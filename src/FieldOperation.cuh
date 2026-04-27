@@ -13,6 +13,72 @@ namespace cfd {
 __device__ void compute_temperature_and_pressure(int i, int j, int k, const DParameter *param, DZone *zone,
   real total_energy);
 
+__device__ __forceinline__ bool is_physical_boundary_cell(const DZone *zone, int i, int j, int k) {
+  if (i == 0 && zone->bType_il(j, k) != 0) return true;
+  if (i == zone->mx - 1 && zone->bType_ir(j, k) != 0) return true;
+  if (j == 0 && zone->bType_jl(i, k) != 0) return true;
+  if (j == zone->my - 1 && zone->bType_jr(i, k) != 0) return true;
+  if (zone->mz > 1) {
+    if (k == 0 && zone->bType_kl(i, j) != 0) return true;
+    if (k == zone->mz - 1 && zone->bType_kr(i, j) != 0) return true;
+  }
+  return false;
+}
+
+__device__ __forceinline__ void sync_two_temperature_state_from_sv(DZone *zone, const DParameter *param, int i, int j,
+  int k) {
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve < 0) return;
+
+    auto &sv = zone->sv;
+    real y[MAX_SPEC_NUMBER];
+    gather_species_mass_fractions(sv, i, j, k, param, y);
+
+    const real t = max(zone->bv(i, j, k, 5), static_cast<real>(1.0));
+    real tve = zone->temperature_ve(i, j, k);
+    if (!isfinite(tve) || tve <= 0.0) {
+      tve = t;
+    }
+
+    if (!isfinite(sv(i, j, k, param->i_eve)) || sv(i, j, k, param->i_eve) <= 0.0) {
+      sv(i, j, k, param->i_eve) = compute_mixture_ve_energy(tve, y, param);
+    } else {
+      tve = invert_tve_from_eve(sv(i, j, k, param->i_eve), y, tve, param);
+    }
+    zone->temperature_ve(i, j, k) = tve;
+  }
+}
+
+__device__ __forceinline__ void apply_vt_relaxation_1_point(DZone *zone, const DParameter *param, int i, int j, int k,
+  real dt_stage) {
+  if constexpr (kTwoTemperature) {
+    if (!param->enable_vt_relaxation || param->i_eve < 0 || dt_stage <= 0.0) return;
+
+    auto &cv = zone->cv;
+    auto &sv = zone->sv;
+    const real density = cv(i, j, k, 0);
+    if (density <= 0.0) return;
+
+    const real tve = zone->temperature_ve(i, j, k) > 0.0 ? zone->temperature_ve(i, j, k) :
+                     max(zone->bv(i, j, k, 5), static_cast<real>(1.0));
+    real y[MAX_SPEC_NUMBER];
+    gather_species_mass_fractions(sv, i, j, k, param, y);
+    real ev_eq{}, tau_eff{};
+    compute_vt_relaxation_source(density, zone->bv(i, j, k, 5), tve, y, param, &ev_eq, &tau_eff);
+    if (tau_eff >= 1e29 || !isfinite(tau_eff)) return;
+
+    const real rho_eve_old = max(cv(i, j, k, 5 + param->i_eve), static_cast<real>(0.0));
+    const real alpha = exp(-dt_stage / max(tau_eff, static_cast<real>(1e-30)));
+    const real ev_old = compute_mixture_vib_energy(tve, y, param);
+    const real ev_new = ev_old * alpha + ev_eq * (1.0 - alpha);
+    const real rho_eve_new = rho_eve_old + density * (ev_new - ev_old);
+    cv(i, j, k, 5 + param->i_eve) = max(rho_eve_new, static_cast<real>(0.0));
+    sv(i, j, k, param->i_eve) = cv(i, j, k, 5 + param->i_eve) / density;
+    zone->temperature_ve(i, j, k) = invert_tve_from_eve(sv(i, j, k, param->i_eve), y, tve, param);
+    compute_temperature_and_pressure(i, j, k, param, zone, cv(i, j, k, 4));
+  }
+}
+
 template<MixtureModel mixture_model> __device__ __forceinline__ void compute_total_energy(int i, int j, int k,
   DZone *zone, const DParameter *param) {
   auto &bv = zone->bv;
@@ -20,15 +86,38 @@ template<MixtureModel mixture_model> __device__ __forceinline__ void compute_tot
   const real V2 = bv(i, j, k, 1) * bv(i, j, k, 1) + bv(i, j, k, 2) * bv(i, j, k, 2) + bv(i, j, k, 3) * bv(i, j, k, 3);
   real total_energy = 0.5 * V2;
   if constexpr (mixture_model != MixtureModel::Air) {
-    real enthalpy[MAX_SPEC_NUMBER];
-    compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
-    // Add species enthalpy together up to kinetic energy to get total enthalpy
-    for (auto l = 0; l < param->n_spec; l++) {
-      // h = \Sum_{i=1}^{n_spec} h_i * Y_i
-      total_energy += enthalpy[l] * zone->sv(i, j, k, l);
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        real enthalpy[MAX_SPEC_NUMBER], cp[MAX_SPEC_NUMBER];
+        compute_enthalpy_and_cp(bv(i, j, k, 5), enthalpy, cp, param);
+        real y[MAX_SPEC_NUMBER];
+        gather_species_mass_fractions(zone->sv, i, j, k, param, y);
+        for (auto l = 0; l < param->n_spec; l++) {
+          total_energy += (enthalpy[l] - param->gas_const[l] * bv(i, j, k, 5)) * y[l];
+        }
+        total_energy -= compute_mixture_ve_energy(bv(i, j, k, 5), y, param);
+        total_energy += zone->sv(i, j, k, param->i_eve);
+        total_energy *= bv(i, j, k, 0);
+      } else {
+        real enthalpy[MAX_SPEC_NUMBER];
+        compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
+        for (auto l = 0; l < param->n_spec; l++) {
+          total_energy += enthalpy[l] * zone->sv(i, j, k, l);
+        }
+        total_energy *= bv(i, j, k, 0); // \rho * h
+        total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
+      }
+    } else {
+      real enthalpy[MAX_SPEC_NUMBER];
+      compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
+      // Add species enthalpy together up to kinetic energy to get total enthalpy
+      for (auto l = 0; l < param->n_spec; l++) {
+        // h = \Sum_{i=1}^{n_spec} h_i * Y_i
+        total_energy += enthalpy[l] * zone->sv(i, j, k, l);
+      }
+      total_energy *= bv(i, j, k, 0); // \rho * h
+      total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
     }
-    total_energy *= bv(i, j, k, 0); // \rho * h
-    total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
   } else {
     total_energy *= bv(i, j, k, 0); // \rho * h
     total_energy += bv(i, j, k, 4) / (gamma_air - 1);
@@ -54,10 +143,10 @@ template<MixtureModel mix_model> __global__ void compute_cv_from_bv(DZone *zone,
   cv(i, j, k, 1) = rho * u;
   cv(i, j, k, 2) = rho * v;
   cv(i, j, k, 3) = rho * w;
-  const auto &sv = zone->sv;
+  sync_two_temperature_state_from_sv(zone, param, i, j, k);
   const int n_scalar{param->n_scalar};
   for (auto l = 0; l < n_scalar; ++l) {
-    cv(i, j, k, 5 + l) = rho * sv(i, j, k, l);
+    cv(i, j, k, 5 + l) = rho * zone->sv(i, j, k, l);
   }
 
   compute_total_energy<mix_model>(i, j, k, zone, param);
@@ -74,10 +163,10 @@ template<MixtureModel mix_model> __device__ __forceinline__ void compute_cv_from
   cv(i, j, k, 2) = rho * bv(i, j, k, 2);
   cv(i, j, k, 3) = rho * bv(i, j, k, 3);
   // It seems we don't need an if here, if there are no other scalars, n_scalar=0; else, n_scalar=n_spec+n_turb
-  const auto &sv = zone->sv;
+  sync_two_temperature_state_from_sv(zone, param, i, j, k);
   const int n_scalar{param->n_scalar};
   for (auto l = 0; l < n_scalar; ++l) {
-    cv(i, j, k, 5 + l) = rho * sv(i, j, k, l);
+    cv(i, j, k, 5 + l) = rho * zone->sv(i, j, k, l);
   }
 
   compute_total_energy<mix_model>(i, j, k, zone, param);
@@ -105,13 +194,43 @@ template<MixtureModel mix_model> __global__ void update_physical_properties(DZon
       imw = fma(y, param->imw[l], imw);
       temp = fma(y, cp[l], temp);
     }
-    const real R = R_u * imw;            // R = R_u / mw
-    temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
-    zone->gamma(i, j, k) = temp;         // gamma = cp / cv
-    temp = sqrt(temp * R * temperature); // temp is acoustic speed now
-    zone->acoustic_speed(i, j, k) = temp;
-    zone->mach(i, j, k) = V / temp;
-    compute_transport_property(i, j, k, temperature, 1 / imw, cp, param, zone);
+    const real mw = 1 / max(imw, static_cast<real>(1e-12));
+    const real R = R_u * imw; // R = R_u / mw
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        real cv_tr{}, cp_tr{}, r_mix{};
+        real y[MAX_SPEC_NUMBER];
+        gather_species_mass_fractions(yk, i, j, k, param, y);
+        compute_mixture_tr_energy(temperature, y, param, &cv_tr, &cp_tr, &r_mix);
+        const real gamma = cp_tr / max(cv_tr, static_cast<real>(1e-8));
+        zone->gamma(i, j, k) = gamma;
+        const real a = sqrt(max(gamma * r_mix * temperature, static_cast<real>(1e-12)));
+        zone->acoustic_speed(i, j, k) = a;
+        zone->mach(i, j, k) = V / a;
+        if (zone->temperature_ve(i, j, k) <= 0) {
+          zone->temperature_ve(i, j, k) = temperature;
+        }
+        compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+        real cv_ve{};
+        compute_mixture_ve_energy(zone->temperature_ve(i, j, k), y, param, &cv_ve);
+        zone->thermal_conductivity_ve(i, j, k) =
+            zone->thermal_conductivity(i, j, k) * cv_ve / max(temp, static_cast<real>(1e-8));
+      } else {
+        temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
+        zone->gamma(i, j, k) = temp;         // gamma = cp / cv
+        temp = sqrt(temp * R * temperature); // temp is acoustic speed now
+        zone->acoustic_speed(i, j, k) = temp;
+        zone->mach(i, j, k) = V / temp;
+        compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+      }
+    } else {
+      temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
+      zone->gamma(i, j, k) = temp;         // gamma = cp / cv
+      temp = sqrt(temp * R * temperature); // temp is acoustic speed now
+      zone->acoustic_speed(i, j, k) = temp;
+      zone->mach(i, j, k) = V / temp;
+      compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+    }
   } else {
     constexpr real c_temp{gamma_air * R_u / mw_air};
     zone->mul(i, j, k) = Sutherland(temperature);
@@ -127,15 +246,38 @@ template<MixtureModel mixture_model> __device__ __forceinline__ real compute_tot
   const real V2 = bv(i, j, k, 1) * bv(i, j, k, 1) + bv(i, j, k, 2) * bv(i, j, k, 2) + bv(i, j, k, 3) * bv(i, j, k, 3);
   real total_energy = 0.5 * V2;
   if constexpr (mixture_model != MixtureModel::Air) {
-    real enthalpy[MAX_SPEC_NUMBER];
-    compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
-    // Add species enthalpy together up to kinetic energy to get total enthalpy
-    for (auto l = 0; l < param->n_spec; l++) {
-      // h = \Sum_{i=1}^{n_spec} h_i * Y_i
-      total_energy += enthalpy[l] * sv(i, j, k, l);
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        real enthalpy[MAX_SPEC_NUMBER], cp[MAX_SPEC_NUMBER];
+        compute_enthalpy_and_cp(bv(i, j, k, 5), enthalpy, cp, param);
+        real y[MAX_SPEC_NUMBER];
+        gather_species_mass_fractions(sv, i, j, k, param, y);
+        for (auto l = 0; l < param->n_spec; l++) {
+          total_energy += (enthalpy[l] - param->gas_const[l] * bv(i, j, k, 5)) * y[l];
+        }
+        total_energy -= compute_mixture_ve_energy(bv(i, j, k, 5), y, param);
+        total_energy += sv(i, j, k, param->i_eve);
+        total_energy *= bv(i, j, k, 0);
+      } else {
+        real enthalpy[MAX_SPEC_NUMBER];
+        compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
+        for (auto l = 0; l < param->n_spec; l++) {
+          total_energy += enthalpy[l] * sv(i, j, k, l);
+        }
+        total_energy *= bv(i, j, k, 0); // \rho * h
+        total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
+      }
+    } else {
+      real enthalpy[MAX_SPEC_NUMBER];
+      compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
+      // Add species enthalpy together up to kinetic energy to get total enthalpy
+      for (auto l = 0; l < param->n_spec; l++) {
+        // h = \Sum_{i=1}^{n_spec} h_i * Y_i
+        total_energy += enthalpy[l] * sv(i, j, k, l);
+      }
+      total_energy *= bv(i, j, k, 0); // \rho * h
+      total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
     }
-    total_energy *= bv(i, j, k, 0); // \rho * h
-    total_energy -= bv(i, j, k, 4); // (\rho e =\rho h - p)
   } else {
     total_energy *= bv(i, j, k, 0); // \rho * u_i * u_i * 0.5
     total_energy += bv(i, j, k, 4) / (gamma_air - 1);
@@ -169,19 +311,27 @@ template<MixtureModel mix_model> __global__ void update_cv_and_bv(DZone *zone, D
   bv(i, j, k, 3) = cv(i, j, k, 3) * density_inv;
 
   auto &sv = zone->sv;
-  real sum_part_den{0};
-  for (int l = 0; l < param->n_spec; ++l) {
-    if (cv(i, j, k, 5 + l) < 0) {
-      // If the species mass fraction is negative, we set it to zero.
-      cv(i, j, k, 5 + l) = 0;
-    } else
-      sum_part_den += cv(i, j, k, l + 5);
+  if constexpr (mix_model != MixtureModel::Air) {
+    real sum_part_den{0};
+    for (int l = 0; l < param->n_spec; ++l) {
+      if (cv(i, j, k, 5 + l) < 0) {
+        // If the species mass fraction is negative, we set it to zero.
+        cv(i, j, k, 5 + l) = 0;
+      } else {
+        sum_part_den += cv(i, j, k, l + 5);
+      }
+    }
+    sum_part_den = 1.0 / sum_part_den;
+    const auto denComDivDenReal = cv(i, j, k, 0) * sum_part_den;
+    for (int l = 0; l < param->n_spec; ++l) {
+      sv(i, j, k, l) = cv(i, j, k, 5 + l) * sum_part_den;
+      cv(i, j, k, 5 + l) *= denComDivDenReal;
+    }
   }
-  sum_part_den = 1.0 / sum_part_den;
-  const auto denComDivDenReal = cv(i, j, k, 0) * sum_part_den;
-  for (int l = 0; l < param->n_spec; ++l) {
-    sv(i, j, k, l) = cv(i, j, k, 5 + l) * sum_part_den;
-    cv(i, j, k, 5 + l) *= denComDivDenReal;
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      cv(i, j, k, 5 + param->i_eve) = max(cv(i, j, k, 5 + param->i_eve), static_cast<real>(0.0));
+    }
   }
   // For multiple species or RANS methods, there will be scalars to be computed
   for (int l = param->n_spec; l < param->n_scalar; ++l) {

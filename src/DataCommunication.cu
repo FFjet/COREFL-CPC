@@ -115,6 +115,7 @@ template<MixtureModel mix_model> void parallel_communication(const Mesh &mesh, s
 
   //A 2-D array which is the cache used when using MPI to send/recv messages. The first dimension is the face index
   //while the second dimension is the coordinate of that face, 3 consecutive number represents one position.
+  const auto temp_s_host = new real *[total_face], temp_r_host = new real *[total_face];
   const auto temp_s = new real *[total_face], temp_r = new real *[total_face];
   const auto length = new int[total_face];
 
@@ -134,6 +135,8 @@ template<MixtureModel mix_model> void parallel_communication(const Mesh &mesh, s
       length[fc_num] = len;
       cudaMalloc(&temp_s[fc_num], len * sizeof(real));
       cudaMalloc(&temp_r[fc_num], len * sizeof(real));
+      temp_s_host[fc_num] = new real[len];
+      temp_r_host[fc_num] = new real[len];
       ++fc_num;
     }
   }
@@ -159,11 +162,11 @@ template<MixtureModel mix_model> void parallel_communication(const Mesh &mesh, s
       dim3 TPB{tpb[0], tpb[1], tpb[2]}, BPG{bpg[0], bpg[1], bpg[2]};
       setup_data_to_be_sent<<<BPG, TPB>>>(field[m].d_ptr, f, &temp_s[fc_num][0], param);
       cudaDeviceSynchronize();
-      //Send and receive. Take care of the first address!
-      // The buffer is on GPU; thus we require a CUDA-aware MPI, such as OpenMPI.
-      MPI_Isend(&temp_s[fc_num][0], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_send, MPI_COMM_WORLD,
+      cudaMemcpy(temp_s_host[fc_num], temp_s[fc_num], length[fc_num] * sizeof(real), cudaMemcpyDeviceToHost);
+      // Send and receive with host staging to avoid relying on CUDA-aware MPI correctness on this system.
+      MPI_Isend(temp_s_host[fc_num], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_send, MPI_COMM_WORLD,
                 &s_request[fc_num]);
-      MPI_Irecv(&temp_r[fc_num][0], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_receive, MPI_COMM_WORLD,
+      MPI_Irecv(temp_r_host[fc_num], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_receive, MPI_COMM_WORLD,
                 &r_request[fc_num]);
       ++fc_num;
     }
@@ -187,6 +190,7 @@ template<MixtureModel mix_model> void parallel_communication(const Mesh &mesh, s
         bpg[j] = (fc.n_point[j] - 1) / tpb[j] + 1;
       }
       dim3 TPB{tpb[0], tpb[1], tpb[2]}, BPG{bpg[0], bpg[1], bpg[2]};
+      cudaMemcpy(temp_r[fc_num], temp_r_host[fc_num], length[fc_num] * sizeof(real), cudaMemcpyHostToDevice);
       assign_data_received<mix_model><<<BPG, TPB>>>(field[blk].d_ptr, f, &temp_r[fc_num][0], param);
       cudaDeviceSynchronize();
       fc_num++;
@@ -199,11 +203,15 @@ template<MixtureModel mix_model> void parallel_communication(const Mesh &mesh, s
   delete[]s_request;
   delete[]r_request;
   for (int i = 0; i < fc_num; ++i) {
-    cudaFree(&temp_s[i][0]);
-    cudaFree(&temp_r[i][0]);
+    cudaFree(temp_s[i]);
+    cudaFree(temp_r[i]);
+    delete[]temp_s_host[i];
+    delete[]temp_r_host[i];
   }
   delete[]temp_s;
   delete[]temp_r;
+  delete[]temp_s_host;
+  delete[]temp_r_host;
   delete[]length;
 }
 
@@ -534,6 +542,7 @@ void parallel_exchange(const Mesh &mesh, std::vector<Field> &field, const Parame
   //A 2-D array which is the cache used when using MPI to send/recv messages. The first dimension is the face index
   //while the second dimension is the coordinate of that face, 3 consecutive number represents one position.
   const auto temp_s = new real *[total_face], temp_r = new real *[total_face];
+  const auto temp_s_host = new real *[total_face], temp_r_host = new real *[total_face];
   const auto length = new int[total_face];
 
   //Added with iterating through faces and will equal to the total face number when the loop ends
@@ -552,6 +561,8 @@ void parallel_exchange(const Mesh &mesh, std::vector<Field> &field, const Parame
       length[fc_num] = len;
       cudaMalloc(&temp_s[fc_num], len * sizeof(real));
       cudaMalloc(&temp_r[fc_num], len * sizeof(real));
+      temp_s_host[fc_num] = new real[len];
+      temp_r_host[fc_num] = new real[len];
       ++fc_num;
     }
   }
@@ -577,11 +588,11 @@ void parallel_exchange(const Mesh &mesh, std::vector<Field> &field, const Parame
       dim3 TPB{tpb[0], tpb[1], tpb[2]}, BPG{bpg[0], bpg[1], bpg[2]};
       setup_data_to_be_sent<<<BPG, TPB>>>(field[m].d_ptr, f, &temp_s[fc_num][0], param, task);
       cudaDeviceSynchronize();
-      //Send and receive. Take care of the first address!
-      // The buffer is on GPU; thus we require a CUDA-aware MPI, such as OpenMPI.
-      MPI_Isend(&temp_s[fc_num][0], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_send, MPI_COMM_WORLD,
+      cudaMemcpy(temp_s_host[fc_num], temp_s[fc_num], length[fc_num] * sizeof(real), cudaMemcpyDeviceToHost);
+      // Send and receive with host staging to avoid relying on CUDA-aware MPI correctness on this system.
+      MPI_Isend(temp_s_host[fc_num], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_send, MPI_COMM_WORLD,
                 &s_request[fc_num]);
-      MPI_Irecv(&temp_r[fc_num][0], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_receive, MPI_COMM_WORLD,
+      MPI_Irecv(temp_r_host[fc_num], length[fc_num], MPI_DOUBLE, fc.target_process, fc.flag_receive, MPI_COMM_WORLD,
                 &r_request[fc_num]);
       ++fc_num;
     }
@@ -605,6 +616,7 @@ void parallel_exchange(const Mesh &mesh, std::vector<Field> &field, const Parame
         bpg[j] = (fc.n_point[j] - 1) / tpb[j] + 1;
       }
       dim3 TPB{tpb[0], tpb[1], tpb[2]}, BPG{bpg[0], bpg[1], bpg[2]};
+      cudaMemcpy(temp_r[fc_num], temp_r_host[fc_num], length[fc_num] * sizeof(real), cudaMemcpyHostToDevice);
       assign_data_received<<<BPG, TPB>>>(field[blk].d_ptr, f, &temp_r[fc_num][0], param, task);
       cudaDeviceSynchronize();
       fc_num++;
@@ -617,11 +629,15 @@ void parallel_exchange(const Mesh &mesh, std::vector<Field> &field, const Parame
   delete[]s_request;
   delete[]r_request;
   for (int i = 0; i < fc_num; ++i) {
-    cudaFree(&temp_s[i][0]);
-    cudaFree(&temp_r[i][0]);
+    cudaFree(temp_s[i]);
+    cudaFree(temp_r[i]);
+    delete[]temp_s_host[i];
+    delete[]temp_r_host[i];
   }
   delete[]temp_s;
   delete[]temp_r;
+  delete[]temp_s_host;
+  delete[]temp_r_host;
   delete[]length;
 }
 

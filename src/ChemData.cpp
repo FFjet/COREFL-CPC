@@ -6,6 +6,7 @@
 #include "Element.h"
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 cfd::Species::Species(Parameter &parameter) {
   parameter.update_parameter("n_spec", 0);
@@ -110,7 +111,214 @@ cfd::Species::Species(Parameter &parameter) {
       }
       printf("\n");
     }
+    if constexpr (kTwoTemperature) {
+      read_two_temperature(parameter);
+    }
   }
+}
+
+namespace {
+int parse_ve_mode(std::string mode_name) {
+  mode_name = gxl::to_upper(mode_name);
+  if (mode_name == "ATOM" || mode_name == "MONOATOMIC") return 0;
+  if (mode_name == "LINEAR") return 1;
+  if (mode_name == "NONLINEAR") return 2;
+  return 0;
+}
+}
+
+void cfd::Species::read_two_temperature(Parameter &parameter) {
+  if (!parameter.get_int("species")) return;
+
+  const std::string file_name = "./input/" + parameter.get_string("two_temperature_file");
+  std::ifstream file(file_name);
+  if (!file) {
+    if (parameter.get_int("myid") == 0) {
+      printf("Two-temperature metadata file %s is missing.\n", file_name.c_str());
+    }
+    MpiParallel::exit();
+  }
+
+  ve_mode.assign(n_spec, 0);
+  theta_v.assign(n_spec, 0.0);
+  n_electronic_level.assign(n_spec, 0);
+  park_sigma.assign(n_spec, 3.0e-21);
+  lt_a.resize(n_spec, n_spec, 0.0);
+  lt_b.resize(n_spec, n_spec, 0.0);
+  std::vector<std::vector<real>> elec_theta_tmp(n_spec), elec_g_tmp(n_spec);
+
+  std::string line;
+  int current_spec = -1;
+  while (std::getline(file, line)) {
+    const auto comment_pos = line.find_first_of("#!");
+    if (comment_pos != std::string::npos) line.erase(comment_pos);
+    std::istringstream iss(line);
+    std::string key;
+    if (!(iss >> key)) continue;
+    key = gxl::to_upper(key);
+
+    if (key == "SPECIES") {
+      std::string spec_name_in;
+      iss >> spec_name_in;
+      spec_name_in = gxl::to_upper(spec_name_in);
+      auto it = spec_list.find(spec_name_in);
+      if (it == spec_list.end()) {
+        current_spec = -2;
+        continue;
+      }
+      current_spec = it->second;
+      continue;
+    }
+    if (key == "END") {
+      current_spec = -1;
+      continue;
+    }
+    if (current_spec < 0) continue;
+
+    if (key == "MODE") {
+      std::string mode_name;
+      iss >> mode_name;
+      ve_mode[current_spec] = parse_ve_mode(mode_name);
+    } else if (key == "THETA_V") {
+      iss >> theta_v[current_spec];
+    } else if (key == "PARK_SIGMA" || key == "SIGMA" || key == "OMEGA") {
+      iss >> park_sigma[current_spec];
+    } else if (key == "ELEC_THETA") {
+      real theta{};
+      while (iss >> theta) {
+        elec_theta_tmp[current_spec].push_back(theta);
+      }
+    } else if (key == "ELEC_G") {
+      real g{};
+      while (iss >> g) {
+        elec_g_tmp[current_spec].push_back(g);
+      }
+    } else if (key == "LT") {
+      std::string partner_name;
+      real a_ij{}, b_ij{};
+      iss >> partner_name >> a_ij >> b_ij;
+      partner_name = gxl::to_upper(partner_name);
+      auto it = spec_list.find(partner_name);
+      if (it == spec_list.end()) continue;
+      lt_a(current_spec, it->second) = a_ij;
+      lt_b(current_spec, it->second) = b_ij;
+    }
+  }
+
+  max_electronic_level = 0;
+  for (int i = 0; i < n_spec; ++i) {
+    if (elec_g_tmp[i].empty() && !elec_theta_tmp[i].empty()) {
+      elec_g_tmp[i].assign(elec_theta_tmp[i].size(), 1.0);
+    }
+    if (elec_theta_tmp[i].size() != elec_g_tmp[i].size()) {
+      if (parameter.get_int("myid") == 0) {
+        printf("Electronic mode metadata size mismatch for species %s.\n", spec_name[i].c_str());
+      }
+      MpiParallel::exit();
+    }
+    n_electronic_level[i] = static_cast<int>(elec_theta_tmp[i].size());
+    max_electronic_level = std::max(max_electronic_level, n_electronic_level[i]);
+  }
+
+  electronic_theta.resize(n_spec, std::max(1, max_electronic_level), 0.0);
+  electronic_g.resize(n_spec, std::max(1, max_electronic_level), 0.0);
+  for (int i = 0; i < n_spec; ++i) {
+    for (int j = 0; j < n_electronic_level[i]; ++j) {
+      electronic_theta(i, j) = elec_theta_tmp[i][j];
+      electronic_g(i, j) = elec_g_tmp[i][j];
+    }
+  }
+  has_two_temperature_data = true;
+
+  if (parameter.get_int("myid") == 0) {
+    printf("\t->-> %-20s : two-temperature metadata loaded\n", file_name.c_str());
+  }
+}
+
+real cfd::Species::compute_ve_energy(int i_spec, real t) const {
+  if (!has_two_temperature_data || i_spec < 0 || i_spec >= n_spec) return 0.0;
+  const real temp = std::max<real>(t, 1.0);
+  const real r_spec = R_u / mw[i_spec];
+  real e_ve = 0.0;
+  if (theta_v[i_spec] > 0) {
+    const real x = theta_v[i_spec] / temp;
+    if (x < 200) {
+      e_ve += r_spec * theta_v[i_spec] / std::expm1(x);
+    }
+  }
+  if (n_electronic_level[i_spec] > 0) {
+    real z = 0.0, weighted_e = 0.0;
+    for (int j = 0; j < n_electronic_level[i_spec]; ++j) {
+      const real theta = electronic_theta(i_spec, j);
+      const real g = electronic_g(i_spec, j);
+      const real boltz = g * std::exp(-theta / temp);
+      z += boltz;
+      weighted_e += boltz * theta;
+    }
+    if (z > 0) e_ve += r_spec * weighted_e / z;
+  }
+  return e_ve;
+}
+
+real cfd::Species::compute_ve_cv(int i_spec, real t) const {
+  if (!has_two_temperature_data || i_spec < 0 || i_spec >= n_spec) return 0.0;
+  const real temp = std::max<real>(t, 1.0);
+  const real r_spec = R_u / mw[i_spec];
+  real cv_ve = 0.0;
+  if (theta_v[i_spec] > 0) {
+    const real x = theta_v[i_spec] / temp;
+    if (x < 200) {
+      const real ex = std::exp(x);
+      const real denom = ex - 1.0;
+      cv_ve += r_spec * x * x * ex / (denom * denom);
+    }
+  }
+  if (n_electronic_level[i_spec] > 0) {
+    real z = 0.0, b = 0.0, c = 0.0;
+    for (int j = 0; j < n_electronic_level[i_spec]; ++j) {
+      const real theta = electronic_theta(i_spec, j);
+      const real g = electronic_g(i_spec, j);
+      const real boltz = g * std::exp(-theta / temp);
+      z += boltz;
+      b += boltz * theta;
+      c += boltz * theta * theta;
+    }
+    if (z > 0) {
+      const real mean = b / z;
+      cv_ve += r_spec * (c / z - mean * mean) / (temp * temp);
+    }
+  }
+  return cv_ve;
+}
+
+real cfd::Species::compute_mixture_ve_energy(real t, const std::vector<real> &y, real *cv_ve) const {
+  real eve = 0.0;
+  real cve = 0.0;
+  for (int i = 0; i < n_spec; ++i) {
+    const real yi = i < static_cast<int>(y.size()) ? y[i] : 0.0;
+    eve += yi * compute_ve_energy(i, t);
+    cve += yi * compute_ve_cv(i, t);
+  }
+  if (cv_ve != nullptr) *cv_ve = cve;
+  return eve;
+}
+
+real cfd::Species::invert_tve_from_eve(real eve_target, const std::vector<real> &y, real t_init) const {
+  real tve = std::max<real>(t_init, 1.0);
+  for (int iter = 0; iter < 80; ++iter) {
+    real cv_ve{};
+    const real eve = compute_mixture_ve_energy(tve, y, &cv_ve);
+    const real residual = eve - eve_target;
+    if (std::abs(residual) < 1e-8 * std::max<real>(1.0, std::abs(eve_target))) break;
+    const real denom = std::max<real>(cv_ve, 1e-8);
+    const real next_tve = std::max<real>(1.0, tve - residual / denom);
+    if (std::abs(next_tve - tve) < 1e-8 * std::max<real>(1.0, tve)) {
+      tve = next_tve;
+      break;
+    }
+    tve = next_tve;
+  }
+  return tve;
 }
 
 void cfd::Species::compute_cp(real temp, real *cp) const & {
@@ -187,59 +395,136 @@ void cfd::Species::compute_cp(real temp, real *cp) const & {
 
 void cfd::Species::compute_enthalpy(real t, real *h) const & {
   const real t2{t * t}, t3{t2 * t}, t4{t3 * t}, t5{t4 * t};
-  #ifdef HighTempMultiPart
-  // undefined
-  #else
-  for (int i = 0; i < n_spec; ++i) {
-    if (t < t_low[i]) {
-      const real tt = t_low[i];
-      const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt5 = tt4 * tt;
-      auto &coeff = low_temp_coeff;
-      h[i] = coeff(i, 0) * tt + 0.5 * coeff(i, 1) * tt2 + coeff(i, 2) * tt3 / 3 + 0.25 * coeff(i, 3) * tt4 +
-             0.2 * coeff(i, 4) * tt5 + coeff(i, 5);
-      const real cp = coeff(i, 0) + coeff(i, 1) * tt + coeff(i, 2) * tt2 + coeff(i, 3) * tt3 + coeff(i, 4) * tt4;
-      h[i] += cp * (t - tt); // Do a linear interpolation for enthalpy
-    } else {
-      auto &coeff = t < t_mid[i] ? low_temp_coeff : high_temp_coeff;
-      h[i] = coeff(i, 0) * t + 0.5 * coeff(i, 1) * t2 + coeff(i, 2) * t3 / 3 + 0.25 * coeff(i, 3) * t4 +
-             0.2 * coeff(i, 4) * t5 + coeff(i, 5);
+  if (nasa_7_or_9 == 7) {
+    #ifdef HighTempMultiPart
+    // undefined
+    #else
+    for (int i = 0; i < n_spec; ++i) {
+      if (t < t_low[i]) {
+        const real tt = t_low[i];
+        const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt5 = tt4 * tt;
+        auto &coeff = low_temp_coeff;
+        h[i] = coeff(i, 0) * tt + 0.5 * coeff(i, 1) * tt2 + coeff(i, 2) * tt3 / 3 + 0.25 * coeff(i, 3) * tt4 +
+               0.2 * coeff(i, 4) * tt5 + coeff(i, 5);
+        const real cp = coeff(i, 0) + coeff(i, 1) * tt + coeff(i, 2) * tt2 + coeff(i, 3) * tt3 + coeff(i, 4) * tt4;
+        h[i] += cp * (t - tt); // Do a linear interpolation for enthalpy
+      } else {
+        auto &coeff = t < t_mid[i] ? low_temp_coeff : high_temp_coeff;
+        h[i] = coeff(i, 0) * t + 0.5 * coeff(i, 1) * t2 + coeff(i, 2) * t3 / 3 + 0.25 * coeff(i, 3) * t4 +
+               0.2 * coeff(i, 4) * t5 + coeff(i, 5);
+      }
+      h[i] *= R_u / mw[i];
     }
-    h[i] *= R_u / mw[i];
+    #endif
+  } else {
+    const auto &c = therm_poly_coeff;
+    const real it{1.0 / t}, lnT{log(t)};
+    for (int i = 0; i < n_spec; ++i) {
+      real tt{t};
+      if (tt < temperature_range(i, 0)) {
+        tt = temperature_range(i, 0);
+        const real tt2{tt * tt}, tt3{tt2 * tt}, tt4{tt3 * tt}, tt5{tt4 * tt};
+        const real itt = 1.0 / tt, itt2 = 1.0 / tt2;
+        h[i] = -c(0, 0, i) * itt + c(1, 0, i) * log(tt) + c(2, 0, i) * tt + 0.5 * c(3, 0, i) * tt2 +
+               c(4, 0, i) * tt3 / 3 + 0.25 * c(5, 0, i) * tt4 + 0.2 * c(6, 0, i) * tt5 + c(7, 0, i);
+        const real cp = c(0, 0, i) * itt2 + c(1, 0, i) * itt + c(2, 0, i) + c(3, 0, i) * tt + c(4, 0, i) * tt2 +
+                        c(5, 0, i) * tt3 + c(6, 0, i) * tt4;
+        h[i] += cp * (t - tt);
+      } else if (tt > temperature_range(i, n_temperature_range[i])) {
+        tt = temperature_range(i, n_temperature_range[i]);
+        const auto j = n_temperature_range[i] - 1;
+        const real tt2{tt * tt}, tt3{tt2 * tt}, tt4{tt3 * tt}, tt5{tt4 * tt};
+        const real itt = 1.0 / tt, itt2 = 1.0 / tt2;
+        h[i] = -c(0, j, i) * itt + c(1, j, i) * log(tt) + c(2, j, i) * tt + 0.5 * c(3, j, i) * tt2 +
+               c(4, j, i) * tt3 / 3 + 0.25 * c(5, j, i) * tt4 + 0.2 * c(6, j, i) * tt5 + c(7, j, i);
+        const real cp = c(0, j, i) * itt2 + c(1, j, i) * itt + c(2, j, i) + c(3, j, i) * tt + c(4, j, i) * tt2 +
+                        c(5, j, i) * tt3 + c(6, j, i) * tt4;
+        h[i] += cp * (t - tt);
+      } else {
+        for (int j = 0; j < n_temperature_range[i]; ++j) {
+          if (temperature_range(i, j) <= tt && tt <= temperature_range(i, j + 1)) {
+            h[i] = -c(0, j, i) * it + c(1, j, i) * lnT + c(2, j, i) * tt + 0.5 * c(3, j, i) * t2 +
+                   c(4, j, i) * t3 / 3 + 0.25 * c(5, j, i) * t4 + 0.2 * c(6, j, i) * t5 + c(7, j, i);
+            break;
+          }
+        }
+      }
+      h[i] *= R_u / mw[i];
+    }
   }
-  #endif
 }
 
 void cfd::Species::compute_enthalpy_and_cp(real t, real *h, real *cp) const & {
   const real t2{t * t}, t3{t2 * t}, t4{t3 * t}, t5{t4 * t};
-  #ifdef HighTempMultiPart
-  #else
-  for (int i = 0; i < n_spec; ++i) {
-    if (t < t_low[i]) {
-      const double tt = t_low[i];
-      const double tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt5 = tt4 * tt;
-      auto &coeff = low_temp_coeff;
-      h[i] = coeff(i, 0) * tt + 0.5 * coeff(i, 1) * tt2 + coeff(i, 2) * tt3 / 3 + 0.25 * coeff(i, 3) * tt4 +
-             0.2 * coeff(i, 4) * tt5 + coeff(i, 5);
-      cp[i] = coeff(i, 0) + coeff(i, 1) * tt + coeff(i, 2) * tt2 + coeff(i, 3) * tt3 + coeff(i, 4) * tt4;
-      h[i] += cp[i] * (t - tt); // Do a linear interpolation for enthalpy
-    } else {
-      auto &coeff = t < t_mid[i] ? low_temp_coeff : high_temp_coeff;
-      h[i] = coeff(i, 0) * t + 0.5 * coeff(i, 1) * t2 + coeff(i, 2) * t3 / 3 + 0.25 * coeff(i, 3) * t4 +
-             0.2 * coeff(i, 4) * t5 + coeff(i, 5);
-      cp[i] = coeff(i, 0) + coeff(i, 1) * t + coeff(i, 2) * t2 + coeff(i, 3) * t3 + coeff(i, 4) * t4;
+  if (nasa_7_or_9 == 7) {
+    #ifdef HighTempMultiPart
+    #else
+    for (int i = 0; i < n_spec; ++i) {
+      if (t < t_low[i]) {
+        const double tt = t_low[i];
+        const double tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt5 = tt4 * tt;
+        auto &coeff = low_temp_coeff;
+        h[i] = coeff(i, 0) * tt + 0.5 * coeff(i, 1) * tt2 + coeff(i, 2) * tt3 / 3 + 0.25 * coeff(i, 3) * tt4 +
+               0.2 * coeff(i, 4) * tt5 + coeff(i, 5);
+        cp[i] = coeff(i, 0) + coeff(i, 1) * tt + coeff(i, 2) * tt2 + coeff(i, 3) * tt3 + coeff(i, 4) * tt4;
+        h[i] += cp[i] * (t - tt); // Do a linear interpolation for enthalpy
+      } else {
+        auto &coeff = t < t_mid[i] ? low_temp_coeff : high_temp_coeff;
+        h[i] = coeff(i, 0) * t + 0.5 * coeff(i, 1) * t2 + coeff(i, 2) * t3 / 3 + 0.25 * coeff(i, 3) * t4 +
+               0.2 * coeff(i, 4) * t5 + coeff(i, 5);
+        cp[i] = coeff(i, 0) + coeff(i, 1) * t + coeff(i, 2) * t2 + coeff(i, 3) * t3 + coeff(i, 4) * t4;
+      }
+      h[i] *= R_u / mw[i];
+      cp[i] *= R_u / mw[i];
     }
-    h[i] *= R_u / mw[i];
-    cp[i] *= R_u / mw[i];
+    #endif
+  } else {
+    const auto &c = therm_poly_coeff;
+    const real it{1.0 / t}, lnT{log(t)}, it2{it * it};
+    for (int i = 0; i < n_spec; ++i) {
+      real tt{t};
+      if (tt < temperature_range(i, 0)) {
+        tt = temperature_range(i, 0);
+        const real tt2{tt * tt}, tt3{tt2 * tt}, tt4{tt3 * tt}, tt5{tt4 * tt};
+        const real itt = 1.0 / tt, itt2 = 1.0 / tt2;
+        h[i] = -c(0, 0, i) * itt + c(1, 0, i) * log(tt) + c(2, 0, i) * tt + 0.5 * c(3, 0, i) * tt2 +
+               c(4, 0, i) * tt3 / 3 + 0.25 * c(5, 0, i) * tt4 + 0.2 * c(6, 0, i) * tt5 + c(7, 0, i);
+        cp[i] = c(0, 0, i) * itt2 + c(1, 0, i) * itt + c(2, 0, i) + c(3, 0, i) * tt + c(4, 0, i) * tt2 +
+                c(5, 0, i) * tt3 + c(6, 0, i) * tt4;
+        h[i] += cp[i] * (t - tt);
+      } else if (tt > temperature_range(i, n_temperature_range[i])) {
+        tt = temperature_range(i, n_temperature_range[i]);
+        const auto j = n_temperature_range[i] - 1;
+        const real tt2{tt * tt}, tt3{tt2 * tt}, tt4{tt3 * tt}, tt5{tt4 * tt};
+        const real itt = 1.0 / tt, itt2 = 1.0 / tt2;
+        h[i] = -c(0, j, i) * itt + c(1, j, i) * log(tt) + c(2, j, i) * tt + 0.5 * c(3, j, i) * tt2 +
+               c(4, j, i) * tt3 / 3 + 0.25 * c(5, j, i) * tt4 + 0.2 * c(6, j, i) * tt5 + c(7, j, i);
+        cp[i] = c(0, j, i) * itt2 + c(1, j, i) * itt + c(2, j, i) + c(3, j, i) * tt + c(4, j, i) * tt2 +
+                c(5, j, i) * tt3 + c(6, j, i) * tt4;
+        h[i] += cp[i] * (t - tt);
+      } else {
+        for (int j = 0; j < n_temperature_range[i]; ++j) {
+          if (temperature_range(i, j) <= tt && tt <= temperature_range(i, j + 1)) {
+            h[i] = -c(0, j, i) * it + c(1, j, i) * lnT + c(2, j, i) * tt + 0.5 * c(3, j, i) * t2 +
+                   c(4, j, i) * t3 / 3 + 0.25 * c(5, j, i) * t4 + 0.2 * c(6, j, i) * t5 + c(7, j, i);
+            cp[i] = c(0, j, i) * it2 + c(1, j, i) * it + c(2, j, i) + c(3, j, i) * tt + c(4, j, i) * t2 +
+                    c(5, j, i) * t3 + c(6, j, i) * t4;
+            break;
+          }
+        }
+      }
+      h[i] *= R_u / mw[i];
+      cp[i] *= R_u / mw[i];
+    }
   }
-  #endif
 }
 
 void cfd::Species::set_nspec(int n_sp, int n_elem) {
   n_spec = n_sp;
   elem_comp.resize(n_sp, n_elem);
   mw.resize(n_sp, 0);
-  #ifdef HighTempMultiPart
   n_temperature_range.resize(n_sp, 2);
+  #ifdef HighTempMultiPart
   #else // Combustion2Part
   t_low.resize(n_sp, 300);
   t_mid.resize(n_sp, 1000);
@@ -266,7 +551,7 @@ bool cfd::Species::read_therm(std::ifstream &therm_dat, bool read_from_comb_mech
   real T_low{300}, T_mid{1000}, T_high{5000};
   #endif // Combustion2Part
   while (std::getline(therm_dat, input)) {
-    if (input[0] == '!' || input.empty()) {
+    if (input.empty() || input[0] == '!') {
       continue;
     }
     std::istringstream line(input);
@@ -294,7 +579,7 @@ bool cfd::Species::read_therm(std::ifstream &therm_dat, bool read_from_comb_mech
   int range_max = 2;
   #endif
   while (getline_to_stream(therm_dat, input, line, gxl::Case::upper)) {
-    if (input[0] == '!' || input.empty()) {
+    if (input.empty() || input[0] == '!') {
       continue;
     }
     line >> key;
@@ -584,11 +869,15 @@ bool cfd::Species::read_therm_nasa9(std::ifstream &therm_dat, bool read_from_com
   }
   real T_low{300}, T_mid{1000}, T_high{6000}, T_hyper{20000};
   while (std::getline(therm_dat, input)) {
-    if (input[0] == '!' || input.empty()) {
+    if (input.empty() || input[0] == '!') {
       continue;
     }
     std::istringstream line(input);
     line >> T_low >> T_mid >> T_high >> T_hyper;
+    if (line.fail()) {
+      printf("NASA9 thermodynamic header is invalid: [%s]\n", input.c_str());
+      MpiParallel::exit();
+    }
     break;
   }
 
@@ -602,7 +891,7 @@ bool cfd::Species::read_therm_nasa9(std::ifstream &therm_dat, bool read_from_com
   std::vector<gxl::MatrixDyn<real>> therm_poly_tempo(n_spec);
   int range_max = 2;
   while (getline_to_stream(therm_dat, input, line, gxl::Case::upper)) {
-    if (input[0] == '!' || input.empty()) {
+    if (input.empty() || input[0] == '!') {
       continue;
     }
     line >> key;
@@ -630,6 +919,10 @@ bool cfd::Species::read_therm_nasa9(std::ifstream &therm_dat, bool read_from_com
     if (!spec_list.contains(key)) {
       // gxl::getline_to_stream(therm_dat, input, line, gxl::Case::upper);
       gxl::getline(therm_dat, input);
+      if (input.size() < 2) {
+        printf("NASA9 thermodynamic section is malformed while skipping unknown species [%s].\n", key.c_str());
+        MpiParallel::exit();
+      }
       key.assign(input, 0, 2);
       const int n_part = std::stoi(key);
       for (int part = 0; part < n_part; ++part) {
@@ -661,6 +954,10 @@ bool cfd::Species::read_therm_nasa9(std::ifstream &therm_dat, bool read_from_com
     }
 
     std::getline(therm_dat, input);
+    if (input.size() < 2) {
+      printf("NASA9 thermodynamic section is malformed for species %s.\n", key.c_str());
+      MpiParallel::exit();
+    }
     const int n_part = std::stoi(key.assign(input, 0, 2));
     n_temperature_spec[curr_sp] = n_part + 1;
     n_temperature_range[curr_sp] = n_part;
@@ -745,7 +1042,7 @@ void cfd::Species::read_tran(std::ifstream &tran_dat) {
 
   std::vector<double> eps_kb(n_spec, 0), sigma(n_spec, 0), mu(n_spec, 0), alpha(n_spec, 0);
   while (getline_to_stream(tran_dat, input, line, gxl::Case::upper)) {
-    if (input[0] == '!' || input.empty()) {
+    if (input.empty() || input[0] == '!') {
       continue;
     }
     line >> key;
@@ -948,6 +1245,21 @@ cfd::Reaction::Reaction(Parameter &parameter, const Species &species) {
     ++has_read;
   }
   set_nreac(has_read, ns);
+  if (kTwoTemperature && ns == 5 && n_reac == 17) {
+    const bool is_air5 = species.spec_list.contains("N2") && species.spec_list.contains("O2") &&
+                         species.spec_list.contains("NO") && species.spec_list.contains("N") &&
+                         species.spec_list.contains("O");
+    if (is_air5) {
+      two_temperature_reaction_temperature = true;
+      for (int r = 0; r < 15; ++r) {
+        tcf_a[r] = 0.5;
+        tcf_b[r] = 0.5;
+      }
+      if (parameter.get_int("myid") == 0) {
+        printf("\t\t->-> %-25s : AIR-5 control-temperature model\n", "SU2 two-temperature");
+      }
+    }
+  }
   if (parameter.get_int("myid") == 0) {
     printf("\t->-> %-20d : number of reactions\n", n_reac);
     std::string method{"explicit"};
@@ -979,6 +1291,10 @@ void cfd::Reaction::set_nreac(int nr, int ns) {
   troe_t3.resize(nr, 0);
   troe_t1.resize(nr, 0);
   troe_t2.resize(nr, 0);
+  tcf_a.resize(nr, 1);
+  tcf_b.resize(nr, 0);
+  tcb_a.resize(nr, 1);
+  tcb_b.resize(nr, 0);
 }
 
 void cfd::Reaction::read_reaction_line(std::string input, int idx, const Species &species) {

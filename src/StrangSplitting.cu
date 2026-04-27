@@ -73,9 +73,12 @@ __device__ void wu_zeroDReaction(const DParameter *param, real dt, DZone *zone, 
   const auto chem_advance_method = param->chem_advance_method;
   if (chem_advance_method == 3) {
     for (int stage = 0; stage < 3; ++stage) {
-      forward_reaction_rate(t, kf, c, param);
+      const real t_stage = bv(i, j, k, 5);
+      const real tve_stage = param->two_temperature ? max(zone->temperature_ve(i, j, k), static_cast<real>(1.0))
+                                                    : t_stage;
+      forward_reaction_rate(t_stage, tve_stage, kf, c, param);
 
-      backward_reaction_rate(t, kf, c, param, kb);
+      backward_reaction_rate(t_stage, tve_stage, kf, c, param, kb);
 
       // compute the rate of progress
       rate_of_progress(kf, kb, c, q, q1, q2, param);
@@ -135,9 +138,10 @@ __device__ void wu_zeroDReaction(const DParameter *param, real dt, DZone *zone, 
   }
 
   // Use 1st order methods
-  forward_reaction_rate(t, kf, c, param);
+  const real tve = param->two_temperature ? max(zone->temperature_ve(i, j, k), static_cast<real>(1.0)) : t;
+  forward_reaction_rate(t, tve, kf, c, param);
 
-  backward_reaction_rate(t, kf, c, param, kb);
+  backward_reaction_rate(t, tve, kf, c, param, kb);
 
   // compute the rate of progress
   rate_of_progress(kf, kb, c, q, q1, q2, param);

@@ -306,6 +306,156 @@ template<int ORDER = 8> __device__ real d_dZeta_inner(const ggxl::VectorField3D<
   return df;
 }
 
+template<int ORDER> __device__ real d_dXi(const ggxl::Array3D<real> &f, int i, int j, int k, int nx,
+  int phyBoundLeft, int phyBoundRight) {
+  real df = 0;
+  if constexpr (ORDER == 8) {
+    bool computed{false};
+    if (phyBoundLeft) {
+      if (i == 0) {
+        df = -25.0 / 12 * f(i, j, k) + 4.0 * f(i + 1, j, k) - 3 * f(i + 2, j, k) + 4.0 / 3 * f(i + 3, j, k)
+             - 0.25 * f(i + 4, j, k);
+        computed = true;
+      } else if (i == 1) {
+        df = -0.25 * f(i - 1, j, k) - 5.0 / 6 * f(i, j, k) + 1.5 * f(i + 1, j, k) - 0.5 * f(i + 2, j, k) +
+             1.0 / 12 * f(i + 3, j, k);
+        computed = true;
+      } else if (i == 2) {
+        df = -1.0 / 12 * (f(i + 2, j, k) - f(i - 2, j, k)) + 2.0 / 3 * (f(i + 1, j, k) - f(i - 1, j, k));
+        computed = true;
+      } else if (i == 3) {
+        df = 0.75 * (f(i + 1, j, k) - f(i - 1, j, k)) - 0.15 * (f(i + 2, j, k) - f(i - 2, j, k))
+             + 1.0 / 60 * (f(i + 3, j, k) - f(i - 3, j, k));
+        computed = true;
+      }
+    }
+    if (phyBoundRight) {
+      if (i == nx - 1) {
+        df = 25.0 / 12 * f(i, j, k) - 4.0 * f(i - 1, j, k) + 3 * f(i - 2, j, k) - 4.0 / 3 * f(i - 3, j, k) +
+             0.25 * f(i - 4, j, k);
+        computed = true;
+      } else if (i == nx - 2) {
+        df = 0.25 * f(i + 1, j, k) + 5.0 / 6 * f(i, j, k) - 1.5 * f(i - 1, j, k) + 0.5 * f(i - 2, j, k) -
+             1.0 / 12 * f(i - 3, j, k);
+        computed = true;
+      } else if (i == nx - 3) {
+        df = -1.0 / 12 * (f(i + 2, j, k) - f(i - 2, j, k)) + 2.0 / 3 * (f(i + 1, j, k) - f(i - 1, j, k));
+        computed = true;
+      } else if (i == nx - 4) {
+        df = 0.75 * (f(i + 1, j, k) - f(i - 1, j, k)) - 0.15 * (f(i + 2, j, k) - f(i - 2, j, k))
+             + 1.0 / 60 * (f(i + 3, j, k) - f(i - 3, j, k));
+        computed = true;
+      }
+    }
+    if (!computed) {
+      constexpr real a1{0.8}, a2{-0.2}, a3{4.0 / 105}, a4{-1.0 / 280};
+      df = a1 * (f(i + 1, j, k) - f(i - 1, j, k)) + a2 * (f(i + 2, j, k) - f(i - 2, j, k))
+           + a3 * (f(i + 3, j, k) - f(i - 3, j, k)) + a4 * (f(i + 4, j, k) - f(i - 4, j, k));
+    }
+  }
+  return df;
+}
+
+template<int ORDER> __device__ real d_dEta(const ggxl::Array3D<real> &f, int i, int j, int k, int ny,
+  int phyBoundLeft, int phyBoundRight) {
+  real df = 0;
+  if constexpr (ORDER == 8) {
+    bool computed{false};
+    if (phyBoundLeft) {
+      if (j == 0) {
+        df = -25.0 / 12 * f(i, j, k) + 4.0 * f(i, j + 1, k) - 3 * f(i, j + 2, k) + 4.0 / 3 * f(i, j + 3, k)
+             - 0.25 * f(i, j + 4, k);
+        computed = true;
+      } else if (j == 1) {
+        df = -0.25 * f(i, j - 1, k) - 5.0 / 6 * f(i, j, k) + 1.5 * f(i, j + 1, k) - 0.5 * f(i, j + 2, k) +
+             1.0 / 12 * f(i, j + 3, k);
+        computed = true;
+      } else if (j == 2) {
+        df = -1.0 / 12 * (f(i, j + 2, k) - f(i, j - 2, k)) + 2.0 / 3 * (f(i, j + 1, k) - f(i, j - 1, k));
+        computed = true;
+      } else if (j == 3) {
+        df = 0.75 * (f(i, j + 1, k) - f(i, j - 1, k)) - 0.15 * (f(i, j + 2, k) - f(i, j - 2, k))
+             + 1.0 / 60 * (f(i, j + 3, k) - f(i, j - 3, k));
+        computed = true;
+      }
+    }
+    if (phyBoundRight) {
+      if (j == ny - 1) {
+        df = 25.0 / 12 * f(i, j, k) - 4.0 * f(i, j - 1, k) + 3 * f(i, j - 2, k) - 4.0 / 3 * f(i, j - 3, k) +
+             0.25 * f(i, j - 4, k);
+        computed = true;
+      } else if (j == ny - 2) {
+        df = 0.25 * f(i, j + 1, k) + 5.0 / 6 * f(i, j, k) - 1.5 * f(i, j - 1, k) + 0.5 * f(i, j - 2, k) -
+             1.0 / 12 * f(i, j - 3, k);
+        computed = true;
+      } else if (j == ny - 3) {
+        df = -1.0 / 12 * (f(i, j + 2, k) - f(i, j - 2, k)) + 2.0 / 3 * (f(i, j + 1, k) - f(i, j - 1, k));
+        computed = true;
+      } else if (j == ny - 4) {
+        df = 0.75 * (f(i, j + 1, k) - f(i, j - 1, k)) - 0.15 * (f(i, j + 2, k) - f(i, j - 2, k))
+             + 1.0 / 60 * (f(i, j + 3, k) - f(i, j - 3, k));
+        computed = true;
+      }
+    }
+    if (!computed) {
+      constexpr real a1{0.8}, a2{-0.2}, a3{4.0 / 105}, a4{-1.0 / 280};
+      df = a1 * (f(i, j + 1, k) - f(i, j - 1, k)) + a2 * (f(i, j + 2, k) - f(i, j - 2, k))
+           + a3 * (f(i, j + 3, k) - f(i, j - 3, k)) + a4 * (f(i, j + 4, k) - f(i, j - 4, k));
+    }
+  }
+  return df;
+}
+
+template<int ORDER> __device__ real d_dZeta(const ggxl::Array3D<real> &f, int i, int j, int k, int nz,
+  int phyBoundLeft, int phyBoundRight) {
+  real df = 0;
+  if constexpr (ORDER == 8) {
+    bool computed{false};
+    if (phyBoundLeft) {
+      if (k == 0) {
+        df = -25.0 / 12 * f(i, j, k) + 4.0 * f(i, j, k + 1) - 3 * f(i, j, k + 2) + 4.0 / 3 * f(i, j, k + 3)
+             - 0.25 * f(i, j, k + 4);
+        computed = true;
+      } else if (k == 1) {
+        df = -0.25 * f(i, j, k - 1) - 5.0 / 6 * f(i, j, k) + 1.5 * f(i, j, k + 1) - 0.5 * f(i, j, k + 2) +
+             1.0 / 12 * f(i, j, k + 3);
+        computed = true;
+      } else if (k == 2) {
+        df = -1.0 / 12 * (f(i, j, k + 2) - f(i, j, k - 2)) + 2.0 / 3 * (f(i, j, k + 1) - f(i, j, k - 1));
+        computed = true;
+      } else if (k == 3) {
+        df = 0.75 * (f(i, j, k + 1) - f(i, j, k - 1)) - 0.15 * (f(i, j, k + 2) - f(i, j, k - 2))
+             + 1.0 / 60 * (f(i, j, k + 3) - f(i, j, k - 3));
+        computed = true;
+      }
+    }
+    if (phyBoundRight) {
+      if (k == nz - 1) {
+        df = 25.0 / 12 * f(i, j, k) - 4.0 * f(i, j, k - 1) + 3 * f(i, j, k - 2) - 4.0 / 3 * f(i, j, k - 3) +
+             0.25 * f(i, j, k - 4);
+        computed = true;
+      } else if (k == nz - 2) {
+        df = 0.25 * f(i, j, k + 1) + 5.0 / 6 * f(i, j, k) - 1.5 * f(i, j, k - 1) + 0.5 * f(i, j, k - 2) -
+             1.0 / 12 * f(i, j, k - 3);
+        computed = true;
+      } else if (k == nz - 3) {
+        df = -1.0 / 12 * (f(i, j, k + 2) - f(i, j, k - 2)) + 2.0 / 3 * (f(i, j, k + 1) - f(i, j, k - 1));
+        computed = true;
+      } else if (k == nz - 4) {
+        df = 0.75 * (f(i, j, k + 1) - f(i, j, k - 1)) - 0.15 * (f(i, j, k + 2) - f(i, j, k - 2))
+             + 1.0 / 60 * (f(i, j, k + 3) - f(i, j, k - 3));
+        computed = true;
+      }
+    }
+    if (!computed) {
+      constexpr real a1{0.8}, a2{-0.2}, a3{4.0 / 105}, a4{-1.0 / 280};
+      df = a1 * (f(i, j, k + 1) - f(i, j, k - 1)) + a2 * (f(i, j, k + 2) - f(i, j, k - 2))
+           + a3 * (f(i, j, k + 3) - f(i, j, k - 3)) + a4 * (f(i, j, k + 4) - f(i, j, k - 4));
+    }
+  }
+  return df;
+}
+
 template<MixtureModel mix_model, int ORDER> __global__ void compute_viscous_flux_collocated(DZone *zone,
   const DParameter *param) {
   const auto i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
@@ -405,6 +555,22 @@ template<MixtureModel mix_model, int ORDER> __global__ void compute_viscous_flux
   fv(i, j, k, 4) = xi_x * Ex + xi_y * Ey + xi_z * Ez;
   gv(i, j, k, 4) = eta_x * Ex + eta_y * Ey + eta_z * Ez;
   hv(i, j, k, 4) = zeta_x * Ex + zeta_y * Ey + zeta_z * Ez;
+
+  if constexpr (mix_model != MixtureModel::Air && kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const auto &tve_field = zone->temperature_ve;
+      const real tve_xi = d_dXi<ORDER>(tve_field, i, j, k, mx, compute_type[0], compute_type[1]);
+      const real tve_eta = d_dEta<ORDER>(tve_field, i, j, k, my, compute_type[2], compute_type[3]);
+      const real tve_zeta = d_dZeta<ORDER>(tve_field, i, j, k, mz, compute_type[4], compute_type[5]);
+      const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
+      const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
+      const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
+      const real conductivity_ve = zone->thermal_conductivity_ve(i, j, k);
+      fv(i, j, k, 4) += conductivity_ve * (xi_x * tve_x + xi_y * tve_y + xi_z * tve_z);
+      gv(i, j, k, 4) += conductivity_ve * (eta_x * tve_x + eta_y * tve_y + eta_z * tve_z);
+      hv(i, j, k, 4) += conductivity_ve * (zeta_x * tve_x + zeta_y * tve_y + zeta_z * tve_z);
+    }
+  }
 }
 
 template<int ORDER> __global__ void compute_viscous_flux_collocated_scalar(DZone *zone, const DParameter *param) {
@@ -647,6 +813,17 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
   const real t_eta = 0.25 * (pv(i, j + 1, k, 5) - pv(i, j - 1, k, 5) + pv(i + 1, j + 1, k, 5) - pv(i + 1, j - 1, k, 5));
   const real t_zeta =
       0.25 * (pv(i, j, k + 1, 5) - pv(i, j, k - 1, 5) + pv(i + 1, j, k + 1, 5) - pv(i + 1, j, k - 1, 5));
+  real tve_xi{0}, tve_eta{0}, tve_zeta{0};
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const auto &tve_field = zone->temperature_ve;
+      tve_xi = tve_field(i + 1, j, k) - tve_field(i, j, k);
+      tve_eta = 0.25 * (tve_field(i, j + 1, k) - tve_field(i, j - 1, k) + tve_field(i + 1, j + 1, k) -
+                        tve_field(i + 1, j - 1, k));
+      tve_zeta = 0.25 * (tve_field(i, j, k + 1) - tve_field(i, j, k - 1) + tve_field(i + 1, j, k + 1) -
+                         tve_field(i + 1, j, k - 1));
+    }
+  }
 
   // chain rule for derivative
   const real u_x = u_xi * xi_x + u_eta * eta_x + u_zeta * zeta_x;
@@ -776,6 +953,25 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
       // Add the influence of species diffusion on total energy
       fv(i, j, k, 3) += h[l] * diffusion_flux;
     }
+
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i + 1, j, k));
+        const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
+        const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
+        const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
+        const real conductivity_ve =
+            0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i + 1, j, k));
+        const real eve_conduction =
+            conductivity_ve * (xi_x_div_jac * tve_x + xi_y_div_jac * tve_y + xi_z_div_jac * tve_z);
+        fv(i, j, k, 3) += eve_conduction;
+        real eve_flux = eve_conduction;
+        for (int l = 0; l < n_spec; ++l) {
+          eve_flux -= compute_ve_energy(l, tve_m, param) * fv(i, j, k, 4 + l);
+        }
+        fv(i, j, k, 4 + param->i_eve) = eve_flux;
+      }
+    }
   }
 
   if (param->n_ps > 0) {
@@ -836,6 +1032,17 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
   const real t_eta = pv(i, j + 1, k, 5) - pv(i, j, k, 5);
   const real t_zeta =
       0.25 * (pv(i, j, k + 1, 5) - pv(i, j, k - 1, 5) + pv(i, j + 1, k + 1, 5) - pv(i, j + 1, k - 1, 5));
+  real tve_xi{0}, tve_eta{0}, tve_zeta{0};
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const auto &tve_field = zone->temperature_ve;
+      tve_xi = 0.25 * (tve_field(i + 1, j, k) - tve_field(i - 1, j, k) + tve_field(i + 1, j + 1, k) -
+                       tve_field(i - 1, j + 1, k));
+      tve_eta = tve_field(i, j + 1, k) - tve_field(i, j, k);
+      tve_zeta = 0.25 * (tve_field(i, j, k + 1) - tve_field(i, j, k - 1) + tve_field(i, j + 1, k + 1) -
+                         tve_field(i, j + 1, k - 1));
+    }
+  }
 
   // chain rule for derivative
   const real u_x = u_xi * xi_x + u_eta * eta_x + u_zeta * zeta_x;
@@ -964,6 +1171,25 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
       // Add the influence of species diffusion on total energy
       gv(i, j, k, 3) += h[l] * diffusion_flux;
     }
+
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j + 1, k));
+        const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
+        const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
+        const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
+        const real conductivity_ve =
+            0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i, j + 1, k));
+        const real eve_conduction =
+            conductivity_ve * (eta_x_div_jac * tve_x + eta_y_div_jac * tve_y + eta_z_div_jac * tve_z);
+        gv(i, j, k, 3) += eve_conduction;
+        real eve_flux = eve_conduction;
+        for (int l = 0; l < n_spec; ++l) {
+          eve_flux -= compute_ve_energy(l, tve_m, param) * gv(i, j, k, 4 + l);
+        }
+        gv(i, j, k, 4 + param->i_eve) = eve_flux;
+      }
+    }
   }
 
   if (param->n_ps > 0) {
@@ -1021,6 +1247,17 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
   const real t_xi = 0.25 * (pv(i + 1, j, k, 5) - pv(i - 1, j, k, 5) + pv(i + 1, j, k + 1, 5) - pv(i - 1, j, k + 1, 5));
   const real t_eta = 0.25 * (pv(i, j + 1, k, 5) - pv(i, j - 1, k, 5) + pv(i, j + 1, k + 1, 5) - pv(i, j - 1, k + 1, 5));
   const real t_zeta = pv(i, j, k + 1, 5) - pv(i, j, k, 5);
+  real tve_xi{0}, tve_eta{0}, tve_zeta{0};
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const auto &tve_field = zone->temperature_ve;
+      tve_xi = 0.25 * (tve_field(i + 1, j, k) - tve_field(i - 1, j, k) + tve_field(i + 1, j, k + 1) -
+                       tve_field(i - 1, j, k + 1));
+      tve_eta = 0.25 * (tve_field(i, j + 1, k) - tve_field(i, j - 1, k) + tve_field(i, j + 1, k + 1) -
+                        tve_field(i, j - 1, k + 1));
+      tve_zeta = tve_field(i, j, k + 1) - tve_field(i, j, k);
+    }
+  }
 
   // chain rule for derivative
   const real u_x = u_xi * xi_x + u_eta * eta_x + u_zeta * zeta_x;
@@ -1147,6 +1384,25 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
       hv(i, j, k, 4 + l) = diffusion_flux;
       // Add the influence of species diffusion on total energy
       hv(i, j, k, 3) += h[l] * diffusion_flux;
+    }
+
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j, k + 1));
+        const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
+        const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
+        const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
+        const real conductivity_ve =
+            0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i, j, k + 1));
+        const real eve_conduction =
+            conductivity_ve * (zeta_x_div_jac * tve_x + zeta_y_div_jac * tve_y + zeta_z_div_jac * tve_z);
+        hv(i, j, k, 3) += eve_conduction;
+        real eve_flux = eve_conduction;
+        for (int l = 0; l < n_spec; ++l) {
+          eve_flux -= compute_ve_energy(l, tve_m, param) * hv(i, j, k, 4 + l);
+        }
+        hv(i, j, k, 4 + param->i_eve) = eve_flux;
+      }
     }
   }
 

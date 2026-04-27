@@ -47,6 +47,8 @@ struct DZone {
   // ggxl::Array3D<real> cp;          // specific heat for constant pressure
   ggxl::Array3D<real> acoustic_speed;
   ggxl::Array3D<real> thermal_conductivity; // Thermal conductivity
+  ggxl::Array3D<real> temperature_ve;       // Vibrational-electronic temperature
+  ggxl::Array3D<real> thermal_conductivity_ve;
 
   // chemical jacobian matrix or diagonal
   ggxl::VectorField3D<real> chem_src_jac;

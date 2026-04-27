@@ -7,6 +7,31 @@
 #include "gxl_lib/MyString.h"
 
 namespace cfd {
+namespace {
+constexpr int kRestartTemperatureVeLabel = 20057;
+
+inline bool read_two_temperature_restart_scalar(Parameter &parameter, std::vector<Field> &field, int blk, int index,
+                                                MPI_File &fp, MPI_Offset &offset, MPI_Datatype ty, MPI_Status &status,
+                                                MPI_Offset memsz) {
+  if constexpr (!kTwoTemperature) {
+    return false;
+  } else {
+    const int i_eve = parameter.get_int("i_eve");
+    if (i_eve >= 0 && index == 6 + i_eve) {
+      auto sv = field[blk].sv[i_eve];
+      MPI_File_read_at(fp, offset, sv, 1, ty, &status);
+      offset += memsz;
+      return true;
+    }
+    if (index == kRestartTemperatureVeLabel) {
+      offset += memsz;
+      return true;
+    }
+    return false;
+  }
+}
+}
+
 template<MixtureModel mix_model> void initialize_basic_variables(Parameter &parameter, const Mesh &mesh,
   std::vector<Field> &field, Species &species) {
   const int init_method = parameter.get_int("initial");
@@ -276,6 +301,7 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
           auto sv = field[blk].sv[index];
           MPI_File_read_at(fp, offset, sv, 1, ty, &status);
           offset += memsz;
+        } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
         } else if ((parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) &&
                    index < 6 + n_spec + n_turb) {
           // RANS/DDES
@@ -391,6 +417,16 @@ template<MixtureModel mix_model> std::vector<int> identify_variable_labels(Param
           if (n == "PS" + std::to_string(i + 1)) {
             l = i_ps + i + 6;
             break;
+          }
+        }
+      }
+      if constexpr (kTwoTemperature) {
+        const int i_eve = parameter.get_int("i_eve");
+        if (i_eve >= 0) {
+          if (n == "EVE") {
+            l = 6 + i_eve;
+          } else if (n == "TVE") {
+            l = kRestartTemperatureVeLabel;
           }
         }
       }
@@ -517,6 +553,7 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
         auto sv = field[blk].sv[index];
         MPI_File_read_at(fp, offset, sv, 1, ty, &status);
         offset += memsz;
+      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
       } else if (index < 6 + n_spec + n_turb) {
         // If laminar, n_turb=0
         // turbulent variables
@@ -645,6 +682,7 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
         auto sv = field[blk].sv[index];
         MPI_File_read_at(fp, offset, sv, 1, ty, &status);
         offset += memsz;
+      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
       } else if ((parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) &&
                  index < 6 + n_spec + n_turb) {
         // RANS/DDES
@@ -760,6 +798,7 @@ void initialize_spec_from_inflow(Parameter &parameter, const Mesh &mesh, std::ve
   for (int blk = 0; blk < mesh.n_block; ++blk) {
     const int mx{mesh[blk].mx}, my{mesh[blk].my}, mz{mesh[blk].mz};
     const auto n_spec = parameter.get_int("n_spec");
+    const auto i_eve = parameter.get_int("i_eve");
     const auto mass_frac = inflow.sv;
     auto &yk = field[blk].sv;
     for (int k = 0; k < mz; ++k) {
@@ -767,6 +806,11 @@ void initialize_spec_from_inflow(Parameter &parameter, const Mesh &mesh, std::ve
         for (int i = 0; i < mx; ++i) {
           for (int l = 0; l < n_spec; ++l) {
             yk(i, j, k, l) = mass_frac[l];
+          }
+          if constexpr (kTwoTemperature) {
+            if (i_eve >= 0) {
+              yk(i, j, k, i_eve) = mass_frac[i_eve];
+            }
           }
         }
       }

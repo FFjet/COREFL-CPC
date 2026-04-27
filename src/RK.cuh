@@ -16,6 +16,16 @@ __device__ constexpr real c[3]{1.0, 0.25, 2.0 / 3.0};
 
 template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone, DParameter *param, real dt, int rk);
 
+static __global__ void apply_vt_relaxation_rk(DZone *zone, DParameter *param, real dt_stage) {
+  const int extent[3]{zone->mx, zone->my, zone->mz};
+  const auto i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const auto j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
+  const auto k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
+  if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+
+  apply_vt_relaxation_1_point(zone, param, i, j, k, dt_stage);
+}
+
 template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
   if (driver.myid == 0) {
     printf("\n************************Time advancement with RK3 starts************************\n");
@@ -76,6 +86,7 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
   const auto need_physical_time{parameter.get_bool("need_physical_time")};
   const auto have_sponge_layer{parameter.get_bool("sponge_layer")};
   const auto hybrid_inviscid_scheme{parameter.get_string("hybrid_inviscid_scheme")};
+  constexpr real rk_stage_dt_scale[3]{1.0, 0.25, 2.0 / 3.0};
 
   std::random_device rd;
   std::mt19937 gen(rd());
@@ -158,18 +169,16 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
 
         // update basic variables
         update_cv_and_bv_rk<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param, dt, rk);
+        if constexpr (kTwoTemperature) {
+          apply_vt_relaxation_rk<<<bpg[b], tpb>>>(field[b].d_ptr, param, rk_stage_dt_scale[rk] * dt);
+        }
 
         // limit unphysical values computed by the program
         if (parameter.get_bool("limit_flow"))
           limit_flow<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param);
 
-        // Apply boundary conditions
-        // Attention: "driver" is a template class, when a template class calls a member function of another template,
-        // the compiler will not treat the called function as a template function,
-        // so we need to explicitly specify the "template" keyword here.
-        // If we call this function in the "driver" member function, we can omit the "template" keyword, as shown in Driver.cu, line 88.
+        // Apply boundary conditions before interface communication to match the legacy 1T path.
         driver.bound_cond.template apply_boundary_conditions<mix_model>(mesh[b], field[b], param, step);
-
         update_values_with_fluctuations<<<bpg[b], tpb>>>(field[b].d_ptr, param);
       }
       // Third, transfer data between and within processes
@@ -236,6 +245,20 @@ template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone
     cv(i, j, k, l) = SSPRK3::a[rk] * qn(i, j, k, l) + SSPRK3::b[rk] * cv(i, j, k, l) +
                      SSPRK3::c[rk] * dt_div_jac * zone->dq(i, j, k, l);
   }
+  if (param->print_nan && (!isfinite(cv(i, j, k, 0)) || cv(i, j, k, 0) <= 0.0) &&
+      (j < 10) && (i < 4 || i > extent[0] - 5)) {
+    printf("bad RK conservative update: rk=%d cell=(%d,%d,%d) jac=%e dt=%e qn={%e,%e,%e,%e,%e} dq={%e,%e,%e,%e,%e} "
+           "bType={%d,%d,%d,%d,%d,%d}\n",
+           rk, i, j, k, zone->jac(i, j, k), dt,
+           qn(i, j, k, 0), qn(i, j, k, 1), qn(i, j, k, 2), qn(i, j, k, 3), qn(i, j, k, 4),
+           zone->dq(i, j, k, 0), zone->dq(i, j, k, 1), zone->dq(i, j, k, 2), zone->dq(i, j, k, 3), zone->dq(i, j, k, 4),
+           i == 0 ? zone->bType_il(j, k) : 0,
+           i == extent[0] - 1 ? zone->bType_ir(j, k) : 0,
+           j == 0 ? zone->bType_jl(i, k) : 0,
+           j == extent[1] - 1 ? zone->bType_jr(i, k) : 0,
+           (zone->mz > 1 && k == 0) ? zone->bType_kl(i, j) : 0,
+           (zone->mz > 1 && k == extent[2] - 1) ? zone->bType_kr(i, j) : 0);
+  }
   if (extent[2] == 1) {
     cv(i, j, k, 3) = 0;
   }
@@ -252,18 +275,38 @@ template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone
 
   auto &sv = zone->sv;
   real sum_part_den{0};
-  for (int l = 0; l < param->n_spec; ++l) {
-    if (cv(i, j, k, 5 + l) < 0) {
-      // If the species mass fraction is negative, we set it to zero.
-      cv(i, j, k, 5 + l) = 0;
-    } else
-      sum_part_den += cv(i, j, k, l + 5);
+  if constexpr (mix_model != MixtureModel::Air) {
+    for (int l = 0; l < param->n_spec; ++l) {
+      if (cv(i, j, k, 5 + l) < 0) {
+        // If the species mass fraction is negative, we set it to zero.
+        cv(i, j, k, 5 + l) = 0;
+      } else {
+        sum_part_den += cv(i, j, k, l + 5);
+      }
+    }
+    if (param->print_nan && (!isfinite(sum_part_den) || sum_part_den <= 0.0 || !isfinite(cv(i, j, k, 0)) ||
+                             cv(i, j, k, 0) <= 0.0 || !isfinite(cv(i, j, k, 4)))) {
+      printf("bad RK state before primitive recovery: cell=(%d,%d,%d) rho=%e rhoE=%e species_sum=%e rhoEve=%e\n", i, j,
+             k, cv(i, j, k, 0), cv(i, j, k, 4), sum_part_den,
+             param->i_eve >= 0 ? cv(i, j, k, 5 + param->i_eve) : 0.0);
+    }
+  } else if (param->print_nan &&
+             (!isfinite(cv(i, j, k, 0)) || cv(i, j, k, 0) <= 0.0 || !isfinite(cv(i, j, k, 4)))) {
+    printf("bad RK air state before primitive recovery: cell=(%d,%d,%d) rho=%e rhoE=%e\n", i, j, k, cv(i, j, k, 0),
+           cv(i, j, k, 4));
   }
-  sum_part_den = 1.0 / sum_part_den;
-  const auto denComDivDenReal = cv(i, j, k, 0) * sum_part_den;
-  for (int l = 0; l < param->n_spec; ++l) {
-    sv(i, j, k, l) = cv(i, j, k, 5 + l) * sum_part_den;
-    cv(i, j, k, 5 + l) *= denComDivDenReal;
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      cv(i, j, k, 5 + param->i_eve) = max(cv(i, j, k, 5 + param->i_eve), static_cast<real>(0.0));
+    }
+  }
+  if constexpr (mix_model != MixtureModel::Air) {
+    sum_part_den = 1.0 / sum_part_den;
+    const auto denComDivDenReal = cv(i, j, k, 0) * sum_part_den;
+    for (int l = 0; l < param->n_spec; ++l) {
+      sv(i, j, k, l) = cv(i, j, k, 5 + l) * sum_part_den;
+      cv(i, j, k, 5 + l) *= denComDivDenReal;
+    }
   }
   // For multiple species or RANS methods, there will be scalars to be computed
   for (int l = param->n_spec; l < param->n_scalar; ++l) {

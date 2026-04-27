@@ -1152,29 +1152,24 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
     const real vm{rlc * Q[2][i_shared] + rrc * Q[2][i_shared + 1]};
     const real wm{rlc * Q[3][i_shared] + rrc * Q[3][i_shared + 1]};
 
-    real svm[MAX_SPEC_NUMBER] = {};
+    real svm[MAX_SPEC_NUMBER + 4] = {};
     for (int l = 0; l < n_var - 5; ++l) {
       svm[l] = rlc * Q[l + 5][i_shared] + rrc * Q[l + 5][i_shared + 1];
     }
 
-    const int ns{param->n_spec};
-    temp1 = 0; // temp1 = gas_constant (R)
-    for (int l = 0; l < ns; ++l) {
-      temp1 += svm[l] * param->gas_const[l];
+    real r_mix_guess{0.0};
+    for (int l = 0; l < param->n_spec; ++l) {
+      r_mix_guess += svm[l] * param->gas_const[l];
     }
-    // temp1 = R, temp3 = T
-    real temp3 = (rlc * F[4][i_shared] + rrc * F[4][i_shared + 1]) / temp1;
+    real temp3 = (rlc * F[4][i_shared] + rrc * F[4][i_shared + 1]) / max(r_mix_guess, static_cast<real>(1e-12));
 
-    // The MAX_SPEC_NUMBER part of fChar are used for cp_i computation first, and later used as the characteristic flux.
-    real fChar[5 + MAX_SPEC_NUMBER];
-    real hI_alpI[MAX_SPEC_NUMBER];                         // First used as h_i, later used as alpha_i.
-    compute_enthalpy_and_cp(temp3, hI_alpI, fChar, param); // temp3 is T
-    real temp2{0};                                         // temp2 = cp
-    for (int l = 0; l < ns; ++l) {
-      temp2 += svm[l] * fChar[l];
-    }
-    const real gamma = temp2 / (temp2 - temp1);  // temp1 = R, temp2 = cp. After here, temp2 is not cp anymore.
-    const real cm = sqrt(gamma * temp1 * temp3); // temp1 is not R anymore.
+    real fChar[5 + MAX_SPEC_NUMBER + 4] = {};
+    real scalar_alpha[MAX_SPEC_NUMBER + 4] = {};
+    real energy_coeff[MAX_SPEC_NUMBER + 4] = {};
+    real gamma{0.0}, cm{0.0};
+    compute_mixture_characteristic_thermo(temp3, svm, param, nullptr, scalar_alpha, energy_coeff, nullptr, nullptr,
+                                          nullptr, nullptr, &gamma, &cm);
+    real temp2{0};
     const real gm1{gamma - 1};
 
     // Next, we compute the left characteristic matrix at i+1/2.
@@ -1208,13 +1203,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
     // The matrix we consider here does not contain the turbulent variables, such as tke and omega.
     //  const real cm2_inv{1.0 / (cm * cm)};
     temp2 = 1.0 / (cm * cm); // temp2 is 1/(c^2), used in the next loop.
-    // Compute the characteristic flux with L.
-    // compute the partial derivative of pressure to species density
-    for (int l = 0; l < ns; ++l) {
-      hI_alpI[l] = gamma * param->gas_const[l] * temp3 - gm1 * hI_alpI[l]; // temp3 is not T anymore.
-      // The computations including this alpha_l are all combined with a division by cm2.
-      hI_alpI[l] *= temp2;
-    }
 
     // Local Lax-Friedrichs flux splitting
     temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
@@ -1234,9 +1222,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP] * F[0][iP], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP] * F[0][iP], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -1313,7 +1301,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         vMinus[6] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[7], vMinus[7];
         int iP = i_shared - 3;
         real LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
@@ -1348,9 +1336,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP] * F[0][iP], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP] * F[0][iP], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -1427,7 +1415,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         vMinus[4] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[5], vMinus[5];
         int iP = i_shared - 2;
         real LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
@@ -1462,11 +1450,11 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
     fc(i, j, k, 4) = temp2 * temp1 - Uk_bar * cm * temp3 + Un * fChar[1] + Uq * fChar[2] - cm * cm / gm1 * fChar[3];
 
     temp2 = 0;
-    for (int l = 0; l < ns; ++l) {
+    for (int l = 0; l < n_var - 5; ++l) {
       fc(i, j, k, 5 + l) = svm[l] * temp1 + fChar[l + 5];
-      temp2 += hI_alpI[l] * fChar[l + 5];
+      temp2 += energy_coeff[l] * fChar[l + 5];
     }
-    fc(i, j, k, 4) -= temp2 * cm * cm / gm1;
+    fc(i, j, k, 4) += temp2;
 
     if (param->positive_preserving) {
       real dt{0};
@@ -1893,29 +1881,25 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
     const real vm{rlc * Q[2][i_shared][tx] + rrc * Q[2][i_shared + 1][tx]};
     const real wm{rlc * Q[3][i_shared][tx] + rrc * Q[3][i_shared + 1][tx]};
 
-    real svm[MAX_SPEC_NUMBER] = {};
+    real svm[MAX_SPEC_NUMBER + 4] = {};
     for (int l = 0; l < n_var - 5; ++l) {
       svm[l] = rlc * Q[l + 5][i_shared][tx] + rrc * Q[l + 5][i_shared + 1][tx];
     }
 
-    const int ns{param->n_spec};
-    temp1 = 0; // temp1 = gas_constant (R)
-    for (int l = 0; l < ns; ++l) {
-      temp1 += svm[l] * param->gas_const[l];
+    real r_mix_guess{0.0};
+    for (int l = 0; l < param->n_spec; ++l) {
+      r_mix_guess += svm[l] * param->gas_const[l];
     }
-    // temp1 = R, temp3 = T
-    real temp3 = (rlc * F[4][i_shared][tx] + rrc * F[4][i_shared + 1][tx]) / temp1;
+    real temp3 = (rlc * F[4][i_shared][tx] + rrc * F[4][i_shared + 1][tx]) /
+                 max(r_mix_guess, static_cast<real>(1e-12));
 
-    // The MAX_SPEC_NUMBER part of fChar are used for cp_i computation first, and later used as the characteristic flux.
-    real fChar[5 + MAX_SPEC_NUMBER];
-    real hI_alpI[MAX_SPEC_NUMBER];                         // First used as h_i, later used as alpha_i.
-    compute_enthalpy_and_cp(temp3, hI_alpI, fChar, param); // temp3 is T
-    real temp2{0};                                         // temp2 = cp
-    for (int l = 0; l < ns; ++l) {
-      temp2 += svm[l] * fChar[l];
-    }
-    const real gamma = temp2 / (temp2 - temp1);  // temp1 = R, temp2 = cp. After here, temp2 is not cp anymore.
-    const real cm = sqrt(gamma * temp1 * temp3); // temp1 is not R anymore.
+    real fChar[5 + MAX_SPEC_NUMBER + 4] = {};
+    real scalar_alpha[MAX_SPEC_NUMBER + 4] = {};
+    real energy_coeff[MAX_SPEC_NUMBER + 4] = {};
+    real gamma{0.0}, cm{0.0};
+    compute_mixture_characteristic_thermo(temp3, svm, param, nullptr, scalar_alpha, energy_coeff, nullptr, nullptr,
+                                          nullptr, nullptr, &gamma, &cm);
+    real temp2{0};
     const real gm1{gamma - 1};
 
     // Next, we compute the left characteristic matrix at i+1/2.
@@ -1949,13 +1933,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
     // The matrix we consider here does not contain the turbulent variables, such as tke and omega.
     //  const real cm2_inv{1.0 / (cm * cm)};
     temp2 = 1.0 / (cm * cm); // temp2 is 1/(c^2), used in the next loop.
-    // Compute the characteristic flux with L.
-    // compute the partial derivative of pressure to species density
-    for (int l = 0; l < ns; ++l) {
-      hI_alpI[l] = gamma * param->gas_const[l] * temp3 - gm1 * hI_alpI[l]; // temp3 is not T anymore.
-      // The computations including this alpha_l are all combined with a division by cm2.
-      hI_alpI[l] *= temp2;
-    }
 
     // Li Xinliang's flux splitting
     //  const real alpha{gm1 * 0.5 * (um * um + vm * vm + wm * wm)};
@@ -1976,9 +1953,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP][tx], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP][tx], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -2059,7 +2036,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[7], vMinus[7];
         int iP = i_shared - 3;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
@@ -2094,9 +2071,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP][tx], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP][tx], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -2173,7 +2150,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[5], vMinus[5];
         int iP = i_shared - 2;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
@@ -2208,11 +2185,11 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
     gc(i, j, k, 4) = temp2 * temp1 - Uk_bar * cm * temp3 + Un * fChar[1] + Uq * fChar[2] - cm * cm / gm1 * fChar[3];
 
     temp2 = 0;
-    for (int l = 0; l < ns; ++l) {
+    for (int l = 0; l < n_var - 5; ++l) {
       gc(i, j, k, 5 + l) = svm[l] * temp1 + fChar[l + 5];
-      temp2 += hI_alpI[l] * fChar[l + 5];
+      temp2 += energy_coeff[l] * fChar[l + 5];
     }
-    gc(i, j, k, 4) -= temp2 * cm * cm / gm1;
+    gc(i, j, k, 4) += temp2;
   }
 }
 
@@ -2567,29 +2544,25 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
     const real vm{rlc * Q[2][i_shared][tx] + rrc * Q[2][i_shared + 1][tx]};
     const real wm{rlc * Q[3][i_shared][tx] + rrc * Q[3][i_shared + 1][tx]};
 
-    real svm[MAX_SPEC_NUMBER] = {};
+    real svm[MAX_SPEC_NUMBER + 4] = {};
     for (int l = 0; l < n_var - 5; ++l) {
       svm[l] = rlc * Q[l + 5][i_shared][tx] + rrc * Q[l + 5][i_shared + 1][tx];
     }
 
-    const int ns{param->n_spec};
-    temp1 = 0; // temp1 = gas_constant (R)
-    for (int l = 0; l < ns; ++l) {
-      temp1 += svm[l] * param->gas_const[l];
+    real r_mix_guess{0.0};
+    for (int l = 0; l < param->n_spec; ++l) {
+      r_mix_guess += svm[l] * param->gas_const[l];
     }
-    // temp1 = R, temp3 = T
-    real temp3 = (rlc * F[4][i_shared][tx] + rrc * F[4][i_shared + 1][tx]) / temp1;
+    real temp3 = (rlc * F[4][i_shared][tx] + rrc * F[4][i_shared + 1][tx]) /
+                 max(r_mix_guess, static_cast<real>(1e-12));
 
-    // The MAX_SPEC_NUMBER part of fChar are used for cp_i computation first, and later used as the characteristic flux.
-    real fChar[5 + MAX_SPEC_NUMBER];
-    real hI_alpI[MAX_SPEC_NUMBER];                         // First used as h_i, later used as alpha_i.
-    compute_enthalpy_and_cp(temp3, hI_alpI, fChar, param); // temp3 is T
-    real temp2{0};                                         // temp2 = cp
-    for (int l = 0; l < ns; ++l) {
-      temp2 += svm[l] * fChar[l];
-    }
-    const real gamma = temp2 / (temp2 - temp1);  // temp1 = R, temp2 = cp. After here, temp2 is not cp anymore.
-    const real cm = sqrt(gamma * temp1 * temp3); // temp1 is not R anymore.
+    real fChar[5 + MAX_SPEC_NUMBER + 4] = {};
+    real scalar_alpha[MAX_SPEC_NUMBER + 4] = {};
+    real energy_coeff[MAX_SPEC_NUMBER + 4] = {};
+    real gamma{0.0}, cm{0.0};
+    compute_mixture_characteristic_thermo(temp3, svm, param, nullptr, scalar_alpha, energy_coeff, nullptr, nullptr,
+                                          nullptr, nullptr, &gamma, &cm);
+    real temp2{0};
     const real gm1{gamma - 1};
 
     // Next, we compute the left characteristic matrix at i+1/2.
@@ -2606,22 +2579,23 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       ny = kz;
       nz = -ky;
     }
+    temp1 = rnorm3d(nx, ny, nz); // temp1 is the norm of the unit normal vector
+    nx *= temp1;
+    ny *= temp1;
+    nz *= temp1;
     qx = ky * nz - kz * ny;
     qy = kz * nx - kx * nz;
     qz = kx * ny - ky * nx;
+    temp1 = rnorm3d(qx, qy, qz); // temp1 is the norm of the unit normal vector
+    qx *= temp1;
+    qy *= temp1;
+    qz *= temp1;
     const real Un = nx * um + ny * vm + nz * wm;
     const real Uq = qx * um + qy * vm + qz * wm;
 
     // The matrix we consider here does not contain the turbulent variables, such as tke and omega.
     //  const real cm2_inv{1.0 / (cm * cm)};
     temp2 = 1.0 / (cm * cm); // temp2 is 1/(c^2), used in the next loop.
-    // Compute the characteristic flux with L.
-    // compute the partial derivative of pressure to species density
-    for (int l = 0; l < ns; ++l) {
-      hI_alpI[l] = gamma * param->gas_const[l] * temp3 - gm1 * hI_alpI[l]; // temp3 is not T anymore.
-      // The computations including this alpha_l are all combined with a division by cm2.
-      hI_alpI[l] *= temp2;
-    }
 
     // Li Xinliang's flux splitting
     //  const real alpha{gm1 * 0.5 * (um * um + vm * vm + wm * wm)};
@@ -2642,9 +2616,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP][tx], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP][tx], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -2725,7 +2699,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[7], vMinus[7];
         int iP = i_shared - 3;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
@@ -2760,9 +2734,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         const int iP = baseP + m;
 
         real sp{0}, sm{0};
-        for (int n = 0; n < ns; ++n) {
-          sp = fma(hI_alpI[n], Q[5 + n][iP][tx], sp);
-          sm = fma(hI_alpI[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
+        for (int n = 0; n < param->n_scalar_transported; ++n) {
+          sp = fma(scalar_alpha[n], Q[5 + n][iP][tx], sp);
+          sm = fma(scalar_alpha[n], Q[5 + n][iP][tx] * F[0][iP][tx], sm);
         }
         sumBetaQ[m] = sp;
         sumBetaF[m] = sm;
@@ -2839,7 +2813,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
-      for (int l = 0; l < ns; ++l) {
+      for (int l = 0; l < n_var - 5; ++l) {
         real vPlus[5], vMinus[5];
         int iP = i_shared - 2;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
@@ -2874,11 +2848,11 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
     hc(i, j, k, 4) = temp2 * temp1 - Uk_bar * cm * temp3 + Un * fChar[1] + Uq * fChar[2] - cm * cm / gm1 * fChar[3];
 
     temp2 = 0;
-    for (int l = 0; l < ns; ++l) {
+    for (int l = 0; l < n_var - 5; ++l) {
       hc(i, j, k, 5 + l) = svm[l] * temp1 + fChar[l + 5];
-      temp2 += hI_alpI[l] * fChar[l + 5];
+      temp2 += energy_coeff[l] * fChar[l + 5];
     }
-    hc(i, j, k, 4) -= temp2 * cm * cm / gm1;
+    hc(i, j, k, 4) += temp2;
   }
 }
 

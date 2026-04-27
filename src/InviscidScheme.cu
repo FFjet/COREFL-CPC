@@ -182,34 +182,34 @@ template<MixtureModel mix_model> __device__ void reconstruction(real *pv, real *
       first_order_reconstruct(pv, pv_l, pv_r, idx_shared, n_var);
   }
   if constexpr (mix_model != MixtureModel::Air) {
-    real el = 0.5 * (pv_l[1] * pv_l[1] + pv_l[2] * pv_l[2] + pv_l[3] * pv_l[3]);
-    real er = 0.5 * (pv_r[1] * pv_r[1] + pv_r[2] * pv_r[2] + pv_r[3] * pv_r[3]);
+    const real ek_l = 0.5 * (pv_l[1] * pv_l[1] + pv_l[2] * pv_l[2] + pv_l[3] * pv_l[3]);
+    const real ek_r = 0.5 * (pv_r[1] * pv_r[1] + pv_r[2] * pv_r[2] + pv_r[3] * pv_r[3]);
     const auto n_spec = param->n_spec;
-    real mw_inv_l{0.0}, mw_inv_r{0.0};
+    real y_l[MAX_SPEC_NUMBER] = {};
+    real y_r[MAX_SPEC_NUMBER] = {};
+    real r_mix_l{0.0}, r_mix_r{0.0};
     for (int l = 0; l < n_spec; ++l) {
-      mw_inv_l += pv_l[5 + l] * param->imw[l];
-      mw_inv_r += pv_r[5 + l] * param->imw[l];
+      y_l[l] = pv_l[5 + l];
+      y_r[l] = pv_r[5 + l];
+      r_mix_l += y_l[l] * param->gas_const[l];
+      r_mix_r += y_r[l] * param->gas_const[l];
     }
-    const real t_l = pv_l[4] / (pv_l[0] * R_u * mw_inv_l);
-    const real t_r = pv_r[4] / (pv_r[0] * R_u * mw_inv_r);
+    const real t_l = pv_l[4] / max(pv_l[0] * r_mix_l, static_cast<real>(1e-12));
+    const real t_r = pv_r[4] / max(pv_r[0] * r_mix_r, static_cast<real>(1e-12));
 
-    real hl[MAX_SPEC_NUMBER], hr[MAX_SPEC_NUMBER], cpl_i[MAX_SPEC_NUMBER], cpr_i[MAX_SPEC_NUMBER];
-    compute_enthalpy_and_cp(t_l, hl, cpl_i, param);
-    compute_enthalpy_and_cp(t_r, hr, cpr_i, param);
-    real cpl{0}, cpr{0}, cvl{0}, cvr{0};
-    for (auto l = 0; l < n_spec; ++l) {
-      cpl += cpl_i[l] * pv_l[l + 5];
-      cpr += cpr_i[l] * pv_r[l + 5];
-      cvl += pv_l[l + 5] * (cpl_i[l] - param->gas_const[l]);
-      cvr += pv_r[l + 5] * (cpr_i[l] - param->gas_const[l]);
-      el += hl[l] * pv_l[l + 5];
-      er += hr[l] * pv_r[l + 5];
-    }
-    pv_l[n_var] = pv_l[0] * el - pv_l[4]; //total energy
-    pv_r[n_var] = pv_r[0] * er - pv_r[4];
+    real e_tr_l{}, e_tr_r{}, gamma_l{}, gamma_r{};
+    compute_mixture_characteristic_thermo(t_l, y_l, param, nullptr, nullptr, nullptr, &e_tr_l, nullptr, nullptr,
+                                          nullptr, &gamma_l, nullptr);
+    compute_mixture_characteristic_thermo(t_r, y_r, param, nullptr, nullptr, nullptr, &e_tr_r, nullptr, nullptr,
+                                          nullptr, &gamma_r, nullptr);
+    const real eve_l = param->i_eve >= 0 ? max(pv_l[5 + param->i_eve], static_cast<real>(0.0)) : 0.0;
+    const real eve_r = param->i_eve >= 0 ? max(pv_r[5 + param->i_eve], static_cast<real>(0.0)) : 0.0;
 
-    pv_l[n_var + 1] = cpl / cvl; //specific heat ratio
-    pv_r[n_var + 1] = cpr / cvr;
+    pv_l[n_var] = pv_l[0] * (ek_l + e_tr_l + eve_l);
+    pv_r[n_var] = pv_r[0] * (ek_r + e_tr_r + eve_r);
+
+    pv_l[n_var + 1] = gamma_l;
+    pv_r[n_var + 1] = gamma_r;
   } else {
     const real el = 0.5 * (pv_l[1] * pv_l[1] + pv_l[2] * pv_l[2] + pv_l[3] * pv_l[3]);
     const real er = 0.5 * (pv_r[1] * pv_r[1] + pv_r[2] * pv_r[2] + pv_r[3] * pv_r[3]);
@@ -495,24 +495,15 @@ template<MixtureModel mix_model> __device__ void riemannSolver_hllc(const real *
       svm[l] = rl_c * pv_l[l + 5] + rr_c * pv_r[l + 5];
     }
 
-    real mw_inv{0};
+    real r_mix_guess{0.0};
     for (int l = 0; l < param->n_spec; ++l) {
-      mw_inv += svm[l] * param->imw[l];
+      r_mix_guess += svm[l] * param->gas_const[l];
     }
-
     const real tl{pv_l[4] / pv_l[0]};
     const real tr{pv_r[4] / pv_r[0]};
-    const real t{(rl_c * tl + rr_c * tr) / (R_u * mw_inv)};
-
-    real cp_i[MAX_SPEC_NUMBER], h_i[MAX_SPEC_NUMBER];
-    compute_enthalpy_and_cp(t, h_i, cp_i, param);
-    real cv{0}, cp{0};
-    for (int l = 0; l < param->n_spec; ++l) {
-      cp += cp_i[l] * svm[l];
-      cv += svm[l] * (cp_i[l] - param->gas_const[l]);
-    }
-    gamma = cp / cv;
-    c_tilde = std::sqrt(gamma * R_u * mw_inv * t);
+    const real t{(rl_c * tl + rr_c * tr) / max(r_mix_guess, static_cast<real>(1e-12))};
+    compute_mixture_characteristic_thermo(t, svm, param, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                          nullptr, &gamma, &c_tilde);
   }
 
   const real kx = 0.5 * (metric[i_shared * 3] + metric[(i_shared + 1) * 3]);
@@ -660,33 +651,23 @@ template<MixtureModel mix_model> __device__ void riemannSolver_Roe(DZone *zone, 
 
   real gamma{gamma_air};
   real c = std::sqrt((gamma - 1) * (h - ek));
-  real mw{mw_air};
   real svm[MAX_SPEC_NUMBER + 4] = {};
   for (int l = 0; l < param->n_var - 5; ++l) {
     svm[l] = (dl * pv_l[l + 5] + dr * pv_r[l + 5]) * inv_denominator;
   }
 
-  real h_i[MAX_SPEC_NUMBER];
+  real scalar_alpha[MAX_SPEC_NUMBER + 4] = {};
+  real energy_coeff[MAX_SPEC_NUMBER + 4] = {};
   if constexpr (mix_model != MixtureModel::Air) {
-    real mw_inv{0};
+    real r_mix_guess{0.0};
     for (int l = 0; l < param->n_spec; ++l) {
-      mw_inv += svm[l] * param->imw[l];
+      r_mix_guess += svm[l] * param->gas_const[l];
     }
-
     const real tl{pv_l[4] / pv_l[0]};
     const real tr{pv_r[4] / pv_r[0]};
-    const real t{(dl * tl + dr * tr) * inv_denominator / (R_u * mw_inv)};
-
-    real cp_i[MAX_SPEC_NUMBER];
-    compute_enthalpy_and_cp(t, h_i, cp_i, param);
-    real cv{0}, cp{0};
-    for (int l = 0; l < param->n_spec; ++l) {
-      cp += cp_i[l] * svm[l];
-      cv += svm[l] * (cp_i[l] - param->gas_const[l]);
-    }
-    gamma = cp / cv;
-    c = std::sqrt(gamma * R_u * mw_inv * t);
-    mw = 1.0 / mw_inv;
+    const real t{(dl * tl + dr * tr) * inv_denominator / max(r_mix_guess, static_cast<real>(1e-12))};
+    compute_mixture_characteristic_thermo(t, svm, param, nullptr, scalar_alpha, energy_coeff, nullptr, nullptr,
+                                          nullptr, nullptr, &gamma, &c);
   }
 
   // Compute the characteristics
@@ -722,8 +703,8 @@ template<MixtureModel mix_model> __device__ void riemannSolver_Roe(DZone *zone, 
 
   real c1 = (gamma - 1) * (ek * dq[0] - u * dq[1] - v * dq[2] - w * dq[3] + dq[4]) / (c * c);
   real c2 = (kx * dq[1] + ky * dq[2] + kz * dq[3] - Uk * dq[0]) / c;
-  for (int l = 0; l < param->n_spec; ++l) {
-    c1 += (mw * param->imw[l] - h_i[l] * (gamma - 1) / (c * c)) * dq[l + 5];
+  for (int l = 0; l < param->n_scalar_transported; ++l) {
+    c1 += scalar_alpha[l] * dq[l + 5];
   }
   real c3 = dq[0] - c1;
 
@@ -750,8 +731,8 @@ template<MixtureModel mix_model> __device__ void riemannSolver_Roe(DZone *zone, 
   c1 = c0 + b[0] + b[4];
   c2 = c * (b[4] - b[0]);
   c3 = 0;
-  for (int l = 0; l < param->n_spec; ++l)
-    c3 += (h_i[l] - mw * param->imw[l] * c * c / (gamma - 1)) * b[l + 5];
+  for (int l = 0; l < param->n_scalar_transported; ++l)
+    c3 += energy_coeff[l] * b[l + 5];
 
   fci[0] += 0.5 * c1;
   fci[1] += 0.5 * (u * c1 + kx * c2 - c * (kz * b[2] - ky * b[3]));

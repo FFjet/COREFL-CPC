@@ -8,14 +8,36 @@ void const_volume_reactor(Parameter &parameter);
 
 #ifdef Combustion2Part
 
+struct ReactorSources {
+  std::vector<real> q1;
+  std::vector<real> q2;
+  std::vector<real> omega_d;
+  std::vector<real> omega;
+  real chemical_eve_source{0};
+  real vt_eve_source{0};
+  real eve_eq{0};
+  real tau_vt{1e30};
+};
+
 void compute_src(int mechanism, real t, const Species &species, const Reaction &reaction, const std::vector<real> &rhoY,
   std::vector<real> &q1, std::vector<real> &q2, std::vector<real> &omega_d, std::vector<real> &omega);
+
+void compute_src(int mechanism, real t, real tve, const Species &species, const Reaction &reaction,
+  const std::vector<real> &rhoY, std::vector<real> &q1, std::vector<real> &q2, std::vector<real> &omega_d,
+  std::vector<real> &omega);
 
 void compute_gibbs_div_rt(real t, const Species &species, std::vector<real> &gibbs_rt);
 
 real update_t(real T0, real imw, const Species &species, const std::vector<real> &yk, real E);
 
 real update_t_with_h(real T0, real imw, const Species &species, const std::vector<real> &yk, real h);
+
+real update_t_two_temperature(real T0, const Species &species, const std::vector<real> &yk, real E, real eve);
+
+real compute_vt_relaxation_source(real density, real t, real tve, const std::vector<real> &y, const Species &species,
+  real *eve_eq = nullptr, real *tau_eff = nullptr);
+
+real compute_two_temperature_chemical_source(real tve, const Species &species, const std::vector<real> &omega);
 
 void chemical_source_hardCoded1(real t, const Species &species, const std::vector<real> &c,
   std::vector<real> &q1, std::vector<real> &q2, std::vector<real> &omega_d, std::vector<real> &omega);
@@ -25,7 +47,13 @@ real arrhenius(real t, real A, real b, real Ea);
 std::vector<real> forward_reaction_rate(real t, const Species &species, const Reaction &reaction,
   const std::vector<real> &c);
 
+std::vector<real> forward_reaction_rate(real t, real tve, const Species &species, const Reaction &reaction,
+  const std::vector<real> &c);
+
 std::vector<real> backward_reaction_rate(real t, const Species &species, const Reaction &reaction,
+  const std::vector<real> &kf, const std::vector<real> &c);
+
+std::vector<real> backward_reaction_rate(real t, real tve, const Species &species, const Reaction &reaction,
   const std::vector<real> &kf, const std::vector<real> &c);
 
 void rate_of_progress(const std::vector<real> &kf, const std::vector<real> &kb, const std::vector<real> &c,

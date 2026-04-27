@@ -156,7 +156,7 @@ template<MixtureModel mix_model> void steady_simulation(Driver<mix_model> &drive
     cudaDeviceSynchronize();
     if (step % output_file == 0 || converged) {
       io_manager.manage_output(step, 0, field, converged, param, driver.bound_cond);
-      post_process(driver);
+      post_process(driver.mesh, field, parameter, driver.param);
     }
   }
   delete[] bpg;

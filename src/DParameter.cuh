@@ -26,6 +26,8 @@ struct DParameter {
   int n_scalar_transported = 0;
   int n_ps = 0;           // The number of passive scalars
   int n_spec = 0;         // The number of species
+  int i_eve = -1;         // The index of Eve in scalar variables
+  int i_eve_cv = -1;      // The index of rho*Eve in conservative variables
   int i_fl = 0;           // The index of flamelet variable in the scalar variable
   int i_fl_cv = 0;        // The index of flamelet variable in the conservative variable
   int i_turb_cv = 0;      // The index of turbulent variable in the conservative variable
@@ -47,6 +49,7 @@ struct DParameter {
   real sensor_threshold = 0.1; // The criteria for hybrid scheme.
 
   real filter_strength = 0; // The strength of the explicit filter
+  int print_nan = 0;
 
   real dt = 0;            // The global time step. If 0, we use the local time step.
   real physical_time = 0; // The physical time of the simulation
@@ -95,6 +98,17 @@ struct DParameter {
   ggxl::MatrixDyn<real> binary_diffusivity_coeff;
   ggxl::MatrixDyn<real> kb_over_eps_jk; // Used to compute reduced temperature for diffusion coefficients
   real *ZRotF298 = nullptr;
+  bool two_temperature = kTwoTemperature;
+  int *ve_mode = nullptr;
+  real *theta_v = nullptr;
+  real *park_sigma = nullptr;
+  int *n_electronic_level = nullptr;
+  int max_electronic_level = 0;
+  ggxl::MatrixDyn<real> electronic_theta;
+  ggxl::MatrixDyn<real> electronic_g;
+  ggxl::MatrixDyn<real> lt_a;
+  ggxl::MatrixDyn<real> lt_b;
+  bool enable_vt_relaxation = true;
 
   real Sc = 0.5;
   real Prt = 0.9;
@@ -109,6 +123,9 @@ struct DParameter {
   real *A2 = nullptr, *b2 = nullptr, *Ea2 = nullptr;
   ggxl::MatrixDyn<real> third_body_coeff;
   real *troe_alpha = nullptr, *troe_t3 = nullptr, *troe_t1 = nullptr, *troe_t2 = nullptr;
+  bool two_temperature_reaction_temperature = false;
+  real *tcf_a = nullptr, *tcf_b = nullptr;
+  real *tcb_a = nullptr, *tcb_b = nullptr;
 
   // Reference value info, currently used by weno, only rho_ref and a_ref2 are used.
   real rho_ref = 1.0;

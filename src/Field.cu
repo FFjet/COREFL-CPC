@@ -114,6 +114,10 @@ std::vector<int> identify_variable_labels(const cfd::Parameter &parameter, std::
     } else if (n == "T" || n == "TEMPERATURE") {
       l = 5 + 3;
       has_temperature = true;
+    } else if (const int i_eve = parameter.get_int("i_eve"); i_eve >= 0 && n == "EVE") {
+      l = 6 + i_eve + 3;
+    } else if (parameter.get_int("i_eve") >= 0 && n == "TVE") {
+      l = 57;
     } else {
       if (n_spec > 0) {
         // We expect to find some species info. If not found, old_data_info[0] will remain 0.
@@ -220,13 +224,20 @@ std::array<int, 3> read_dat_profile_for_init(gxl::VectorField3D<real> &profile, 
   }
 
   const int n_var = parameter.get_int("n_var");
+  const int i_eve = parameter.get_int("i_eve");
+  std::vector<real> yk(species.n_spec, 0.0);
   profile.resize(extent[0], extent[1], extent[2], n_var + 4, 0);
   for (int k = 0; k < extent[2]; ++k) {
     for (int j = 0; j < extent[1]; ++j) {
       for (int i = 0; i < extent[0]; ++i) {
+        real tve_input = -1.0;
+        bool eve_set = false;
         for (int l = 0; l < nv_read; ++l) {
-          if (label_order[l] < n_var + 1 + 3) {
+          if (label_order[l] == 57) {
+            tve_input = profile_read(i, j, k, l);
+          } else if (label_order[l] < n_var + 1 + 3) {
             profile(i, j, k, label_order[l]) = profile_read(i, j, k, l);
+            if (i_eve >= 0 && label_order[l] == 6 + i_eve + 3) eve_set = true;
           }
         }
 
@@ -248,6 +259,12 @@ std::array<int, 3> read_dat_profile_for_init(gxl::VectorField3D<real> &profile, 
             mw = 1 / mw;
           }
           profile(i, j, k, 4 + 3) = profile(i, j, k, 5 + 3) * cfd::R_u * profile(i, j, k, 0 + 3) / mw;
+        }
+        if (i_eve >= 0 && !eve_set && tve_input > 0.0 && species.n_spec > 0) {
+          for (int l = 0; l < species.n_spec; ++l) {
+            yk[l] = profile(i, j, k, 6 + l + 3);
+          }
+          profile(i, j, k, 6 + i_eve + 3) = species.compute_mixture_ve_energy(tve_input, yk);
         }
       }
     }
@@ -489,6 +506,10 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
     h_ptr->acoustic_speed.allocate_memory(mx, my, mz, ngg);
     h_ptr->thermal_conductivity.allocate_memory(mx, my, mz, ngg);
     h_ptr->gamma.allocate_memory(mx, my, mz, ngg);
+    if constexpr (kTwoTemperature) {
+      h_ptr->temperature_ve.allocate_memory(mx, my, mz, ngg);
+      h_ptr->thermal_conductivity_ve.allocate_memory(mx, my, mz, ngg);
+    }
     // h_ptr->cp.allocate_memory(mx, my, mz, ngg);
     if (parameter.get_int("reaction") == 1) {
       // Finite rate chemistry
@@ -632,6 +653,12 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
   for (const auto ll: parameter.get_int_array("ov_labels")) {
     if (ll == 51) {
       h_ptr->mach.allocate_memory(mx, my, mz, ngg);
+    } else if (ll == 57) {
+      if constexpr (kTwoTemperature) {
+        if (n_spec > 0 && h_ptr->temperature_ve.size() == 0) {
+          h_ptr->temperature_ve.allocate_memory(mx, my, mz, ngg);
+        }
+      }
     } else if (ll == 52) {
       h_ptr->mut.allocate_memory(mx, my, mz, ngg);
     } else if (ll == 53) {
@@ -672,6 +699,16 @@ void cfd::Field::copy_data_from_device(const Parameter &parameter) {
     switch (ov_labels[l]) {
       case 51:
         hPtr = h_ptr->mach.data();
+        break;
+      case 57:
+        if constexpr (kTwoTemperature) {
+          hPtr = h_ptr->temperature_ve.data();
+        }
+        break;
+      case 58:
+        if constexpr (kTwoTemperature) {
+          hPtr = h_ptr->thermal_conductivity_ve.data();
+        }
         break;
       case 52:
         hPtr = h_ptr->mut.data();
@@ -729,6 +766,10 @@ void cfd::Field::deallocate_memory(const Parameter &parameter) {
     err = h_ptr->acoustic_speed.deallocate_memory();
     err = h_ptr->thermal_conductivity.deallocate_memory();
     err = h_ptr->gamma.deallocate_memory();
+    if constexpr (kTwoTemperature) {
+      err = h_ptr->temperature_ve.deallocate_memory();
+      err = h_ptr->thermal_conductivity_ve.deallocate_memory();
+    }
     // h_ptr->cp.deallocate_memory();
     if (parameter.get_int("reaction") == 1) {
       // Finite rate chemistry

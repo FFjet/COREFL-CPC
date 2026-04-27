@@ -41,6 +41,7 @@ struct Inflow {
   real mach = -1;
   real pressure = -1;
   real temperature = -1;
+  real temperature_ve = -1;
   real velocity = 0;
   real density = -1;
   real aoa = -1000;
@@ -55,6 +56,7 @@ struct Inflow {
   // When inflow_type = 2, this set is used as the lower part.
   real p_lower = 101325;
   real t_lower = -1;
+  real tve_lower = -1;
   real density_lower = -1;
   real u_lower = 1, v_lower = 0, w_lower = 0;
   real *sv_lower = nullptr;
@@ -106,6 +108,7 @@ struct Wall {
 
   // If the wall thermal type is radiation equilibrium, this is set as the inflow temperature.
   real temperature{300};
+  real temperature_ve{-1};
   real emissivity{0.8};
   // 0 - no fluctuation
   // 1 - Pirozzoli & Li fluctuations, suppose the spanwise z direction is periodic, and not partitioned by MPI processes.
@@ -148,6 +151,7 @@ struct FarField {
   real mach = -1;
   real pressure = -1;
   real temperature = -1;
+  real temperature_ve = -1;
   real velocity = 0;
   real density = -1;
   real u = 1, v = 0, w = 0;

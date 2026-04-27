@@ -22,6 +22,14 @@ struct Species {
 
   void compute_enthalpy_and_cp(real t, real *h, real *cp) const &;
 
+  [[nodiscard]] real compute_ve_energy(int i_spec, real t) const;
+
+  [[nodiscard]] real compute_ve_cv(int i_spec, real t) const;
+
+  [[nodiscard]] real compute_mixture_ve_energy(real t, const std::vector<real> &y, real *cv_ve = nullptr) const;
+
+  [[nodiscard]] real invert_tve_from_eve(real eve_target, const std::vector<real> &y, real t_init) const;
+
   // The properties of the species. Some previously private derived variables will appear in the corresponding function classes.
   std::map<std::string, int> elem_list; // element list
   gxl::MatrixDyn<real> elem_comp;       // the element composition of the species
@@ -43,6 +51,17 @@ struct Species {
   gxl::MatrixDyn<real> binary_diffusivity_coeff;
   gxl::MatrixDyn<real> kb_over_eps_jk; // Used to compute reduced temperature for diffusion coefficients
   std::vector<real> ZRotF298;          // the rotational relaxation collision number at 298 K.
+  // Two-temperature metadata
+  bool has_two_temperature_data{false};
+  int max_electronic_level{0};
+  std::vector<int> ve_mode;                // 0-atom, 1-linear, 2-nonlinear
+  std::vector<real> theta_v;               // characteristic vibrational temperature
+  std::vector<int> n_electronic_level;
+  gxl::MatrixDyn<real> electronic_theta;   // theta_j for electronic modes
+  gxl::MatrixDyn<real> electronic_g;       // degeneracy of each electronic mode
+  gxl::MatrixDyn<real> lt_a;               // Millikan-White A_ij
+  gxl::MatrixDyn<real> lt_b;               // Millikan-White B_ij
+  std::vector<real> park_sigma;            // Limiting cross-section for Park correction at 50,000 K
 
 private:
   void set_nspec(int n_sp, int n_elem);
@@ -52,6 +71,8 @@ private:
   bool read_therm_nasa9(std::ifstream &therm_dat, bool read_from_comb_mech);
 
   void read_tran(std::ifstream &tran_dat);
+
+  void read_two_temperature(Parameter &parameter);
 
   static int is_polar(real dipole_moment);
 
@@ -88,5 +109,8 @@ public:
   std::vector<real> A2, b2, Ea2;
   gxl::MatrixDyn<real> third_body_coeff;
   std::vector<real> troe_alpha, troe_t3, troe_t1, troe_t2;
+  bool two_temperature_reaction_temperature{false};
+  std::vector<real> tcf_a, tcf_b;
+  std::vector<real> tcb_a, tcb_b;
 };
 }

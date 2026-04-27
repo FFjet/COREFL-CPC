@@ -48,11 +48,14 @@ spongeZPlusEnd{parameter.get_real("spongeZPlusEnd")}*/ {
   shock_sensor = parameter.get_int("shock_sensor");
   sensor_eps = parameter.get_real("shockSensor_epsilon");
   sensor_threshold = parameter.get_real("shockSensor_threshold");
+  print_nan = parameter.get_int("print_nan");
   // }
 
   const auto &spec = species;
   n_spec = spec.n_spec;
   n_scalar = parameter.get_int("n_scalar");
+  i_eve = parameter.get_int("i_eve");
+  i_eve_cv = parameter.get_int("i_eve_cv");
   if (reaction != nullptr) {
     n_reac = reaction->n_reac;
   }
@@ -145,6 +148,28 @@ spongeZPlusEnd{parameter.get_real("spongeZPlusEnd")}*/ {
              kb_over_eps_jk.size() * sizeof(real), cudaMemcpyHostToDevice);
   cudaMalloc(&ZRotF298, mem_sz);
   cudaMemcpy(ZRotF298, spec.ZRotF298.data(), mem_sz, cudaMemcpyHostToDevice);
+  if (two_temperature && n_spec > 0) {
+    cudaMalloc(&ve_mode, n_spec * sizeof(int));
+    cudaMemcpy(ve_mode, spec.ve_mode.data(), n_spec * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(&theta_v, mem_sz);
+    cudaMemcpy(theta_v, spec.theta_v.data(), mem_sz, cudaMemcpyHostToDevice);
+    cudaMalloc(&park_sigma, mem_sz);
+    cudaMemcpy(park_sigma, spec.park_sigma.data(), mem_sz, cudaMemcpyHostToDevice);
+    cudaMalloc(&n_electronic_level, n_spec * sizeof(int));
+    cudaMemcpy(n_electronic_level, spec.n_electronic_level.data(), n_spec * sizeof(int), cudaMemcpyHostToDevice);
+    max_electronic_level = std::max(1, spec.max_electronic_level);
+    electronic_theta.init_with_size(n_spec, max_electronic_level);
+    cudaMemcpy(electronic_theta.data(), spec.electronic_theta.data(), electronic_theta.size() * sizeof(real),
+               cudaMemcpyHostToDevice);
+    electronic_g.init_with_size(n_spec, max_electronic_level);
+    cudaMemcpy(electronic_g.data(), spec.electronic_g.data(), electronic_g.size() * sizeof(real),
+               cudaMemcpyHostToDevice);
+    lt_a.init_with_size(n_spec, n_spec);
+    cudaMemcpy(lt_a.data(), spec.lt_a.data(), lt_a.size() * sizeof(real), cudaMemcpyHostToDevice);
+    lt_b.init_with_size(n_spec, n_spec);
+    cudaMemcpy(lt_b.data(), spec.lt_b.data(), lt_b.size() * sizeof(real), cudaMemcpyHostToDevice);
+  }
+  enable_vt_relaxation = parameter.get_bool("enable_vt_relaxation");
   Sc = parameter.get_real("schmidt_number");
 
   // reaction info
@@ -189,6 +214,15 @@ spongeZPlusEnd{parameter.get_real("spongeZPlusEnd")}*/ {
     cudaMemcpy(troe_t1, reaction->troe_t1.data(), mem_sz, cudaMemcpyHostToDevice);
     cudaMalloc(&troe_t2, mem_sz);
     cudaMemcpy(troe_t2, reaction->troe_t2.data(), mem_sz, cudaMemcpyHostToDevice);
+    two_temperature_reaction_temperature = reaction->two_temperature_reaction_temperature;
+    cudaMalloc(&tcf_a, mem_sz);
+    cudaMemcpy(tcf_a, reaction->tcf_a.data(), mem_sz, cudaMemcpyHostToDevice);
+    cudaMalloc(&tcf_b, mem_sz);
+    cudaMemcpy(tcf_b, reaction->tcf_b.data(), mem_sz, cudaMemcpyHostToDevice);
+    cudaMalloc(&tcb_a, mem_sz);
+    cudaMemcpy(tcb_a, reaction->tcb_a.data(), mem_sz, cudaMemcpyHostToDevice);
+    cudaMalloc(&tcb_b, mem_sz);
+    cudaMemcpy(tcb_b, reaction->tcb_b.data(), mem_sz, cudaMemcpyHostToDevice);
   }
 
   if (parameter.get_bool("if_collect_statistics")) {

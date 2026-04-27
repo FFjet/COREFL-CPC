@@ -401,7 +401,9 @@ void cfd::Parameter::setup_default_settings() {
   string_parameters["transport_file"] = "chemistry/tran.dat";
   int_parameters["chemSrcMethod"] = 0; // explicit treatment of the chemical source term is used by default.
   real_parameters["c_chi"] = 1;
-  int_parameters["therm_nasa_7_9"] = 7;
+  int_parameters["therm_nasa_7_9"] = 9;
+  string_parameters["two_temperature_file"] = "chemistry/two_temperature.dat";
+  bool_parameters["enable_vt_relaxation"] = true;
 
   bool_parameters["turbulence"] = false;            // laminar
   int_parameters["turbulence_method"] = 1;          // 1-RAS, 2-DES
@@ -546,9 +548,47 @@ void cfd::Parameter::diagnose_parallel_info() {
 }
 
 void cfd::Parameter::deduce_sim_info(const Species &spec) {
+  if (kTwoTemperature && get_int("species") == 0) {
+    if (get_int("myid") == 0) {
+      printf("Two-temperature mode requires species-based mixture simulations.\n");
+    }
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  if (kTwoTemperature && (get_int("reaction") == 2 || get_int("species") == 2)) {
+    if (get_int("myid") == 0) {
+      printf("Two-temperature mode is currently implemented for finite-rate mixture transport only.\n");
+    }
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+  if (kTwoTemperature) {
+    if (get_bool("steady")) {
+      if (get_int("myid") == 0) {
+        printf("Two-temperature mode is currently qualified only on the transient RK3 path.\n");
+        printf("Steady mode is blocked because rhoEve VT relaxation is not wired into that update path.\n");
+      }
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    const int temporal_scheme = get_int("temporal_scheme");
+    if (temporal_scheme != 3) {
+      if (get_int("myid") == 0) {
+        printf("Two-temperature mode currently supports temporal_scheme = 3 only.\n");
+        if (temporal_scheme == 2) {
+          printf("Dual-time stepping is blocked because the rhoEve VT relaxation path is incomplete there.\n");
+        } else if (temporal_scheme == 4) {
+          printf("Wu's splitting is blocked because rhoEve chemistry/VT updates are incomplete there.\n");
+        } else {
+          printf("Unsupported temporal_scheme = %d in two-temperature mode.\n", temporal_scheme);
+        }
+      }
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+  }
+
   int n_var = 5, n_scalar = 0, n_scalar_transported = 0, n_other_var = 1;
   int i_turb_cv = 5, i_fl_cv = 0;
   int i_ps = 0, i_ps_cv = 5; // ps - passive scalar
+  int i_eve = -1, i_eve_cv = -1;
 
   if (get_int("species") == 1) {
     n_scalar += get_int("n_spec");
@@ -583,6 +623,16 @@ void cfd::Parameter::deduce_sim_info(const Species &spec) {
     }
     i_ps_cv = i_fl_cv + 2;
   }
+  if (kTwoTemperature && get_int("species") == 1 && get_int("reaction") != 2) {
+    i_eve = get_int("n_spec");
+    i_eve_cv = 5 + get_int("n_spec");
+    ++n_scalar;
+    ++n_scalar_transported;
+    ++i_turb_cv;
+    ++i_ps;
+    ++i_ps_cv;
+    ++n_other_var; // Tve
+  }
   if (get_bool("turbulence")) {
     // turbulence simulation
     if (const auto turb_method = get_int("turbulence_method"); turb_method == 1 || turb_method == 2) {
@@ -604,10 +654,12 @@ void cfd::Parameter::deduce_sim_info(const Species &spec) {
   update_parameter("n_scalar", n_scalar);
   update_parameter("n_scalar_transported", n_scalar_transported);
   update_parameter("i_turb_cv", i_turb_cv);
-  update_parameter("i_fl", get_int("n_turb") + get_int("n_spec"));
+  update_parameter("i_fl", get_int("n_turb") + get_int("n_spec") + (i_eve >= 0 ? 1 : 0));
   update_parameter("i_fl_cv", i_fl_cv);
   update_parameter("i_ps", i_ps);
   update_parameter("i_ps_cv", i_ps_cv);
+  update_parameter("i_eve", i_eve);
+  update_parameter("i_eve_cv", i_eve_cv);
   n_other_var += static_cast<int>(get_string_array("available_field_var").size());
   update_parameter("n_other_var", n_other_var);
 
@@ -776,6 +828,11 @@ void cfd::Parameter::get_variable_names(const Species &spec) {
       VNs[nn] = 1000 + ind;
     }
     nv += ns;
+    if (kTwoTemperature && get_int("i_eve") >= 0) {
+      var_name.emplace_back("Eve");
+      VNs["EVE"] = VNsDefault.at("EVE");
+      ++nv;
+    }
   }
   if (get_bool("turbulence")) {
     if (const auto turb_method = get_int("turbulence_method"); turb_method == 1 || turb_method == 2) {
@@ -821,6 +878,11 @@ void cfd::Parameter::get_variable_names(const Species &spec) {
   var_name.emplace_back("mach");
   ov_labels.emplace_back(VNsDefault.at("MACH"));
   ++nv;
+  if (kTwoTemperature && get_int("i_eve") >= 0) {
+    var_name.emplace_back("Tve");
+    ov_labels.emplace_back(VNsDefault.at("TVE"));
+    ++nv;
+  }
   if (const auto turb_method = get_int("turbulence_method"); turb_method == 1 || turb_method == 2) {
     // RAS/DDES
     var_name.emplace_back("mut");

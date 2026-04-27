@@ -162,7 +162,7 @@ template<MixtureModel mix_model> void Driver<mix_model>::initialize_computation(
     MpiParallel::exit();
   }
 
-  // First, apply boundary conditions to all boundaries; all ghost grids will have reasonable values.
+  // First, apply boundary conditions to all boundaries; this matches the legacy 1T path.
   for (int b = 0; b < mesh.n_block; ++b) {
     bound_cond.apply_boundary_conditions<mix_model>(mesh[b], field[b], param, 0);
   }
@@ -176,7 +176,7 @@ template<MixtureModel mix_model> void Driver<mix_model>::initialize_computation(
     MpiParallel::exit();
   }
 
-  // Third, communicate values between processes
+  // Second, communicate values between processes.
   MpiParallel::barrier();
   if (myid == 0)
     printf("\tStart transferring data\n");
@@ -191,7 +191,7 @@ template<MixtureModel mix_model> void Driver<mix_model>::initialize_computation(
     MpiParallel::exit();
   }
 
-  // Fourth, compute the physical properties
+  // Third, compute the physical properties
   for (auto b = 0; b < mesh.n_block; ++b) {
     const int mx{mesh[b].mx}, my{mesh[b].my}, mz{mesh[b].mz};
     dim3 bpg{(mx + ng_1) / tpb.x + 1, (my + ng_1) / tpb.y + 1, (mz + ng_1) / tpb.z + 1};

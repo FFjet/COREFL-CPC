@@ -8,6 +8,71 @@
 #include "FieldOperation.cuh"
 
 namespace cfd {
+__device__ __forceinline__ void project_boundary_index_to_interior(const DZone *zone, int (&idx_ref)[3]) {
+  if (idx_ref[0] <= 0 && zone->bType_il(idx_ref[1], idx_ref[2]) != 0) {
+    idx_ref[0] = 1;
+  } else if (idx_ref[0] >= zone->mx - 1 && zone->bType_ir(idx_ref[1], idx_ref[2]) != 0) {
+    idx_ref[0] = zone->mx - 2;
+  }
+  if (idx_ref[1] <= 0 && zone->bType_jl(idx_ref[0], idx_ref[2]) != 0) {
+    idx_ref[1] = 1;
+  } else if (idx_ref[1] >= zone->my - 1 && zone->bType_jr(idx_ref[0], idx_ref[2]) != 0) {
+    idx_ref[1] = zone->my - 2;
+  }
+  if (zone->mz > 1) {
+    if (idx_ref[2] <= 0 && zone->bType_kl(idx_ref[0], idx_ref[1]) != 0) {
+      idx_ref[2] = 1;
+    } else if (idx_ref[2] >= zone->mz - 1 && zone->bType_kr(idx_ref[0], idx_ref[1]) != 0) {
+      idx_ref[2] = zone->mz - 2;
+    }
+  }
+}
+
+template<MixtureModel mix_model>
+__device__ __forceinline__ real boundary_gas_constant(const real *sv_state, const DParameter *param) {
+  if constexpr (mix_model == MixtureModel::Air) {
+    return R_air;
+  } else {
+    real r_mix = 0;
+    for (int l = 0; l < param->n_spec; ++l) {
+      r_mix += sv_state[l] * param->gas_const[l];
+    }
+    return max(r_mix, static_cast<real>(1e-12));
+  }
+}
+
+template<MixtureModel mix_model>
+__device__ __forceinline__ real boundary_local_sound_speed(const DZone *zone, const DParameter *param, int i, int j,
+  int k) {
+  if constexpr (mix_model == MixtureModel::Air) {
+    return sqrt(max(gamma_air * R_air * zone->bv(i, j, k, 5), static_cast<real>(1e-12)));
+  } else {
+    return max(zone->acoustic_speed(i, j, k), static_cast<real>(1e-12));
+  }
+}
+
+template<MixtureModel mix_model>
+__device__ __forceinline__ void set_boundary_state(DZone *zone, const DParameter *param, int i, int j, int k,
+  real rho, real u, real v, real w, real p, real t, const real *sv_state, real tve) {
+  auto &bv = zone->bv;
+  auto &sv = zone->sv;
+  bv(i, j, k, 0) = rho;
+  bv(i, j, k, 1) = u;
+  bv(i, j, k, 2) = v;
+  bv(i, j, k, 3) = w;
+  bv(i, j, k, 4) = p;
+  bv(i, j, k, 5) = t;
+  for (int l = 0; l < param->n_scalar; ++l) {
+    sv(i, j, k, l) = sv_state[l];
+  }
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      zone->temperature_ve(i, j, k) = max(tve, static_cast<real>(1.0));
+    }
+  }
+  compute_cv_from_bv_1_point<mix_model>(zone, param, i, j, k);
+}
+
 template<typename BCType> void register_bc(BCType *&bc, int n_bc, std::vector<int> &indices, BCInfo *&bc_info,
   Species &species, Parameter &parameter) {
   if (n_bc <= 0) {
@@ -1236,6 +1301,8 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
           // const int ir = bigNumberFace ? extent[0] - 1 + ic : -ic;
           const int ir = -ic;
           // Assign the values in 0th order
+          real tve_input = -1.0;
+          bool eve_set = false;
           for (int l = 3; l < nv_read; ++l) {
             if (label_order[l] < 6) {
               // Basic variables
@@ -1244,6 +1311,17 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               // Species variables
               int ls = label_order[l] - 1000;
               profile_to_match(ir, j, k, 6 + ls) = profile_read(i0, j0, k0, l);
+            } else if constexpr (kTwoTemperature) {
+              if (parameter.get_int("i_eve") >= 0 && label_order[l] == VNsDefault.at("EVE")) {
+                profile_to_match(ir, j, k, 6 + parameter.get_int("i_eve")) = profile_read(i0, j0, k0, l);
+                eve_set = true;
+              } else if (label_order[l] == VNsDefault.at("TVE")) {
+                tve_input = profile_read(i0, j0, k0, l);
+              } else if (label_order[l] < 6 + n_scalar - n_spec) {
+                // Turbulence variables or mixture fraction variables
+                int ls = label_order[l] + n_spec;
+                profile_to_match(ir, j, k, ls) = profile_read(i0, j0, k0, l);
+              }
             } else if (label_order[l] < 6 + n_scalar - n_spec) {
               // Turbulence variables or mixture fraction variables
               int ls = label_order[l] + n_spec;
@@ -1269,6 +1347,14 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               mw = 1 / mw;
             }
             profile_to_match(ir, j, k, 4) = profile_to_match(ir, j, k, 5) * R_u * profile_to_match(ir, j, k, 0) / mw;
+          }
+          if constexpr (kTwoTemperature) {
+            if (parameter.get_int("i_eve") >= 0 && !eve_set && tve_input > 0.0 && n_spec > 0) {
+              std::vector<real> yk_spec(n_spec, 0.0);
+              for (int l = 0; l < n_spec; ++l) yk_spec[l] = profile_to_match(ir, j, k, 6 + l);
+              profile_to_match(ir, j, k, 6 + parameter.get_int("i_eve")) =
+                  species.compute_mixture_ve_energy(tve_input, yk_spec);
+            }
           }
         }
       }
@@ -1318,6 +1404,8 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
 
           const int jr = -jc;
           // Assign the values in 0th order
+          real tve_input = -1.0;
+          bool eve_set = false;
           for (int l = 3; l < nv_read; ++l) {
             if (label_order[l] < 6) {
               // Basic variables
@@ -1326,6 +1414,17 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               // Species variables
               int ls = label_order[l] - 1000;
               profile_to_match(i, jr, k, 6 + ls) = profile_read(i0, j0, k0, l);
+            } else if constexpr (kTwoTemperature) {
+              if (parameter.get_int("i_eve") >= 0 && label_order[l] == VNsDefault.at("EVE")) {
+                profile_to_match(i, jr, k, 6 + parameter.get_int("i_eve")) = profile_read(i0, j0, k0, l);
+                eve_set = true;
+              } else if (label_order[l] == VNsDefault.at("TVE")) {
+                tve_input = profile_read(i0, j0, k0, l);
+              } else if (label_order[l] < 6 + n_scalar - n_spec) {
+                // Turbulence variables or mixture fraction variables
+                int ls = label_order[l] + n_spec;
+                profile_to_match(i, jr, k, ls) = profile_read(i0, j0, k0, l);
+              }
             } else if (label_order[l] < 6 + n_scalar - n_spec) {
               // Turbulence variables or mixture fraction variables
               int ls = label_order[l] + n_spec;
@@ -1351,6 +1450,14 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               mw = 1 / mw;
             }
             profile_to_match(i, jr, k, 4) = profile_to_match(i, jr, k, 5) * R_u * profile_to_match(i, jr, k, 0) / mw;
+          }
+          if constexpr (kTwoTemperature) {
+            if (parameter.get_int("i_eve") >= 0 && !eve_set && tve_input > 0.0 && n_spec > 0) {
+              std::vector<real> yk_spec(n_spec, 0.0);
+              for (int l = 0; l < n_spec; ++l) yk_spec[l] = profile_to_match(i, jr, k, 6 + l);
+              profile_to_match(i, jr, k, 6 + parameter.get_int("i_eve")) =
+                  species.compute_mixture_ve_energy(tve_input, yk_spec);
+            }
           }
         }
       }
@@ -1400,6 +1507,8 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
 
           const int kr = -kc;
           // Assign the values in 0th order
+          real tve_input = -1.0;
+          bool eve_set = false;
           for (int l = 3; l < nv_read; ++l) {
             if (label_order[l] < 6) {
               // Basic variables
@@ -1408,6 +1517,17 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               // Species variables
               int ls = label_order[l] - 1000;
               profile_to_match(i, j, kr, 6 + ls) = profile_read(i0, j0, k0, l);
+            } else if constexpr (kTwoTemperature) {
+              if (parameter.get_int("i_eve") >= 0 && label_order[l] == VNsDefault.at("EVE")) {
+                profile_to_match(i, j, kr, 6 + parameter.get_int("i_eve")) = profile_read(i0, j0, k0, l);
+                eve_set = true;
+              } else if (label_order[l] == VNsDefault.at("TVE")) {
+                tve_input = profile_read(i0, j0, k0, l);
+              } else if (label_order[l] < 6 + n_scalar - n_spec) {
+                // Turbulence variables or mixture fraction variables
+                int ls = label_order[l] + n_spec;
+                profile_to_match(i, j, kr, ls) = profile_read(i0, j0, k0, l);
+              }
             } else if (label_order[l] < 6 + n_scalar - n_spec) {
               // Turbulence variables or mixture fraction variables
               int ls = label_order[l] + n_spec;
@@ -1433,6 +1553,14 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
               mw = 1 / mw;
             }
             profile_to_match(i, j, kr, 4) = profile_to_match(i, j, kr, 5) * R_u * profile_to_match(i, j, kr, 0) / mw;
+          }
+          if constexpr (kTwoTemperature) {
+            if (parameter.get_int("i_eve") >= 0 && !eve_set && tve_input > 0.0 && n_spec > 0) {
+              std::vector<real> yk_spec(n_spec, 0.0);
+              for (int l = 0; l < n_spec; ++l) yk_spec[l] = profile_to_match(i, j, kr, 6 + l);
+              profile_to_match(i, j, kr, 6 + parameter.get_int("i_eve")) =
+                  species.compute_mixture_ve_energy(tve_input, yk_spec);
+            }
           }
         }
       }
@@ -2039,6 +2167,11 @@ template<MixtureModel mix_model> __global__ void apply_symmetry(DZone *zone, int
   for (int l = 0; l < param->n_scalar; ++l) {
     sv(i, j, k, l) = sv(inner_idx[0], inner_idx[1], inner_idx[2], l);
   }
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      zone->temperature_ve(i, j, k) = zone->temperature_ve(inner_idx[0], inner_idx[1], inner_idx[2]);
+    }
+  }
 
   // For ghost grids
   for (int g = 1; g <= zone->ngg; ++g) {
@@ -2056,6 +2189,11 @@ template<MixtureModel mix_model> __global__ void apply_symmetry(DZone *zone, int
     bv(gi, gj, gk, 5) = bv(ii, ij, ik, 5);
     for (int l = 0; l < param->n_scalar; ++l) {
       sv(gi, gj, gk, l) = sv(ii, ij, ik, l);
+    }
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        zone->temperature_ve(gi, gj, gk) = zone->temperature_ve(ii, ij, ik);
+      }
     }
 
     compute_cv_from_bv_1_point<mix_model>(zone, param, gi, gj, gk);
@@ -2144,6 +2282,9 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
         for (int l = 0; l < param->n_spec; ++l) {
           sv(gi, gj, gk, l) = 2 * yk_b[l] - sv(ii, ij, ik, l);
         }
+        for (int l = param->n_spec; l < param->n_scalar; ++l) {
+          sv(gi, gj, gk, l) = 2 * sv(i, j, k, l) - sv(ii, ij, ik, l);
+        }
         if constexpr (mix_model != MixtureModel::Air) {
           real R = 0;
           for (int l = 0; l < param->n_spec; ++l) {
@@ -2152,6 +2293,13 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
           bv(gi, gj, gk, 5) = p_g / (rho_g * R);
         } else {
           bv(gi, gj, gk, 5) = p_g / (rho_g * R_air);
+        }
+        if constexpr (kTwoTemperature) {
+          if (param->i_eve >= 0) {
+            const real tve_b = zone->temperature_ve(i, j, k) > 0.0 ? zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
+            const real tve_i = zone->temperature_ve(ii, ij, ik) > 0.0 ? zone->temperature_ve(ii, ij, ik) : bv(ii, ij, ik, 5);
+            zone->temperature_ve(gi, gj, gk) = max(2 * tve_b - tve_i, static_cast<real>(1.0));
+          }
         }
 
         compute_cv_from_bv_1_point<mix_model>(zone, param, gi, gj, gk);
@@ -2169,6 +2317,12 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
         for (int l = 0; l < param->n_scalar; ++l) {
           sv(gi, gj, gk, l) = sv(i, j, k, l);
         }
+        if constexpr (kTwoTemperature) {
+          if (param->i_eve >= 0) {
+            zone->temperature_ve(gi, gj, gk) = zone->temperature_ve(i, j, k) > 0.0 ?
+                                               zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
+          }
+        }
 
         compute_cv_from_bv_1_point<mix_model>(zone, param, gi, gj, gk);
       }
@@ -2182,8 +2336,147 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
       for (int l = 0; l < param->n_scalar; ++l) {
         sv(gi, gj, gk, l) = sv(i, j, k, l);
       }
+      if constexpr (kTwoTemperature) {
+        if (param->i_eve >= 0) {
+          zone->temperature_ve(gi, gj, gk) = zone->temperature_ve(i, j, k) > 0.0 ?
+                                             zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
+        }
+      }
       compute_cv_from_bv_1_point<mix_model>(zone, param, gi, gj, gk);
     }
+  }
+}
+
+template<MixtureModel mix_model> __global__ void apply_farfield(DZone *zone, FarField *farfield, int i_face,
+  const DParameter *param) {
+  const int ngg = zone->ngg;
+  int dir[]{0, 0, 0};
+  const auto &b = zone->boundary[i_face];
+  dir[b.face] = b.direction;
+  const auto range_start = b.range_start, range_end = b.range_end;
+  const int i = range_start[0] + static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const int j = range_start[1] + static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
+  const int k = range_start[2] + static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
+  if (i > range_end[0] || j > range_end[1] || k > range_end[2]) return;
+
+  auto &bv = zone->bv;
+  auto &sv = zone->sv;
+
+  int i_in[3]{i - dir[0], j - dir[1], k - dir[2]};
+  project_boundary_index_to_interior(zone, i_in);
+
+  real nx{zone->metric(i, j, k, b.face * 3)},
+      ny{zone->metric(i, j, k, b.face * 3 + 1)},
+      nz{zone->metric(i, j, k, b.face * 3 + 2)};
+  const real grad_n_inv = b.direction / sqrt(nx * nx + ny * ny + nz * nz);
+  nx *= grad_n_inv;
+  ny *= grad_n_inv;
+  nz *= grad_n_inv;
+
+  const real rho_in = bv(i_in[0], i_in[1], i_in[2], 0);
+  const real u_in = bv(i_in[0], i_in[1], i_in[2], 1);
+  const real v_in = bv(i_in[0], i_in[1], i_in[2], 2);
+  const real w_in = bv(i_in[0], i_in[1], i_in[2], 3);
+  const real p_in = bv(i_in[0], i_in[1], i_in[2], 4);
+  const real t_in = bv(i_in[0], i_in[1], i_in[2], 5);
+  const real c_in = boundary_local_sound_speed<mix_model>(zone, param, i_in[0], i_in[1], i_in[2]);
+  const real rho_c_in = max(rho_in * c_in, static_cast<real>(1e-12));
+  const real mn_in = (u_in * nx + v_in * ny + w_in * nz) / c_in;
+
+  enum class FarfieldMode : int {
+    supersonic_inflow,
+    subsonic_inflow,
+    subsonic_outflow,
+    supersonic_outflow,
+  };
+  FarfieldMode mode = FarfieldMode::subsonic_outflow;
+  if (mn_in <= -1.0) {
+    mode = FarfieldMode::supersonic_inflow;
+  } else if (mn_in < 0.0) {
+    mode = FarfieldMode::subsonic_inflow;
+  } else if (mn_in < 1.0) {
+    mode = FarfieldMode::subsonic_outflow;
+  } else {
+    mode = FarfieldMode::supersonic_outflow;
+  }
+
+  real sv_b[MAX_SPEC_NUMBER + 4 + MAX_PASSIVE_SCALAR_NUMBER]{};
+  real rho_b{rho_in}, u_b{u_in}, v_b{v_in}, w_b{w_in}, p_b{p_in}, t_b{t_in};
+  real tve_b{t_in};
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const real tve_in = zone->temperature_ve(i_in[0], i_in[1], i_in[2]) > 0.0 ?
+                          zone->temperature_ve(i_in[0], i_in[1], i_in[2]) : t_in;
+      tve_b = tve_in;
+    }
+  }
+
+  if (mode == FarfieldMode::supersonic_inflow || mode == FarfieldMode::subsonic_inflow) {
+    for (int l = 0; l < param->n_scalar; ++l) {
+      sv_b[l] = farfield->sv[l];
+    }
+    if (mode == FarfieldMode::supersonic_inflow) {
+      rho_b = farfield->density;
+      u_b = farfield->u;
+      v_b = farfield->v;
+      w_b = farfield->w;
+      p_b = farfield->pressure;
+      t_b = farfield->temperature;
+    } else {
+      const real du_n = (farfield->u - u_in) * nx + (farfield->v - v_in) * ny + (farfield->w - w_in) * nz;
+      p_b = 0.5 * (p_in + farfield->pressure - rho_in * c_in * du_n);
+      p_b = max(p_b, static_cast<real>(0.1) * max(farfield->pressure, static_cast<real>(1.0)));
+      rho_b = farfield->density + (p_b - farfield->pressure) / (c_in * c_in);
+      rho_b = max(rho_b, static_cast<real>(0.1) * max(farfield->density, static_cast<real>(1e-12)));
+      u_b = farfield->u - (p_b - farfield->pressure) * nx / rho_c_in;
+      v_b = farfield->v - (p_b - farfield->pressure) * ny / rho_c_in;
+      w_b = farfield->w - (p_b - farfield->pressure) * nz / rho_c_in;
+      const real r_mix = boundary_gas_constant<mix_model>(sv_b, param);
+      t_b = p_b / max(rho_b * r_mix, static_cast<real>(1e-12));
+    }
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        tve_b = farfield->temperature_ve > 0.0 ? farfield->temperature_ve : t_b;
+      }
+    }
+  } else {
+    for (int l = 0; l < param->n_scalar; ++l) {
+      sv_b[l] = sv(i_in[0], i_in[1], i_in[2], l);
+    }
+    if (mode == FarfieldMode::subsonic_outflow) {
+      p_b = farfield->pressure;
+      const real dp = p_b - p_in;
+      rho_b = rho_in + dp / (c_in * c_in);
+      rho_b = max(rho_b, static_cast<real>(0.1) * max(rho_in, static_cast<real>(1e-12)));
+      u_b = u_in - dp * nx / rho_c_in;
+      v_b = v_in - dp * ny / rho_c_in;
+      w_b = w_in - dp * nz / rho_c_in;
+      const real r_mix = boundary_gas_constant<mix_model>(sv_b, param);
+      t_b = p_b / max(rho_b * r_mix, static_cast<real>(1e-12));
+    }
+  }
+
+  set_boundary_state<mix_model>(zone, param, i, j, k, rho_b, u_b, v_b, w_b, p_b, t_b, sv_b, tve_b);
+
+  for (int g = 1; g <= ngg; ++g) {
+    int ii[3]{i - g * dir[0], j - g * dir[1], k - g * dir[2]};
+    project_boundary_index_to_interior(zone, ii);
+    const int gi{i + g * dir[0]}, gj{j + g * dir[1]}, gk{k + g * dir[2]};
+
+    real rho_g{rho_b}, u_g{u_b}, v_g{v_b}, w_g{w_b}, p_g{p_b}, t_g{t_b};
+    real tve_g{tve_b};
+    if (mode == FarfieldMode::subsonic_inflow || mode == FarfieldMode::subsonic_outflow) {
+      rho_g = 2 * rho_b - bv(ii[0], ii[1], ii[2], 0);
+      p_g = 2 * p_b - bv(ii[0], ii[1], ii[2], 4);
+      rho_g = max(rho_g, static_cast<real>(0.1) * max(rho_b, static_cast<real>(1e-12)));
+      p_g = max(p_g, static_cast<real>(0.1) * max(p_b, static_cast<real>(1.0)));
+      u_g = 2 * u_b - bv(ii[0], ii[1], ii[2], 1);
+      v_g = 2 * v_b - bv(ii[0], ii[1], ii[2], 2);
+      w_g = 2 * w_b - bv(ii[0], ii[1], ii[2], 3);
+      const real r_mix = boundary_gas_constant<mix_model>(sv_b, param);
+      t_g = p_g / max(rho_g * r_mix, static_cast<real>(1e-12));
+    }
+    set_boundary_state<mix_model>(zone, param, gi, gj, gk, rho_g, u_g, v_g, w_g, p_g, t_g, sv_b, tve_g);
   }
 }
 
@@ -2773,6 +3066,26 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
   auto &bv = zone->bv;
   auto &sv = zone->sv;
 
+  auto project_to_interior = [&](int (&idx_ref)[3]) {
+    if (idx_ref[0] <= 0 && zone->bType_il(idx_ref[1], idx_ref[2]) != 0) {
+      idx_ref[0] = 1;
+    } else if (idx_ref[0] >= zone->mx - 1 && zone->bType_ir(idx_ref[1], idx_ref[2]) != 0) {
+      idx_ref[0] = zone->mx - 2;
+    }
+    if (idx_ref[1] <= 0 && zone->bType_jl(idx_ref[0], idx_ref[2]) != 0) {
+      idx_ref[1] = 1;
+    } else if (idx_ref[1] >= zone->my - 1 && zone->bType_jr(idx_ref[0], idx_ref[2]) != 0) {
+      idx_ref[1] = zone->my - 2;
+    }
+    if (zone->mz > 1) {
+      if (idx_ref[2] <= 0 && zone->bType_kl(idx_ref[0], idx_ref[1]) != 0) {
+        idx_ref[2] = 1;
+      } else if (idx_ref[2] >= zone->mz - 1 && zone->bType_kr(idx_ref[0], idx_ref[1]) != 0) {
+        idx_ref[2] = zone->mz - 2;
+      }
+    }
+  };
+
   int jet_label = -1;
   if (param->problem_type == 2) {
     // jicf problem
@@ -2822,8 +3135,10 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
   }
 
   real t_wall{bv(i, j, k, 5)};
+  real tve_wall{t_wall};
 
-  const int idx[]{i - dir[0], j - dir[1], k - dir[2]};
+  int idx[]{i - dir[0], j - dir[1], k - dir[2]};
+  project_to_interior(idx);
   if (wall->thermal_type == Wall::ThermalType::isothermal) {
     t_wall = wall->temperature;
   } else if (wall->thermal_type == Wall::ThermalType::adiabatic) {
@@ -2845,6 +3160,18 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
     }
     if (t_wall < wall->temperature) {
       t_wall = wall->temperature;
+    }
+  }
+
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      const real tve_in = zone->temperature_ve(idx[0], idx[1], idx[2]) > 0.0 ?
+                          zone->temperature_ve(idx[0], idx[1], idx[2]) : bv(idx[0], idx[1], idx[2], 5);
+      if (wall->thermal_type == Wall::ThermalType::adiabatic) {
+        tve_wall = tve_in;
+      } else {
+        tve_wall = wall->temperature_ve > 0.0 ? wall->temperature_ve : t_wall;
+      }
     }
   }
   const real p{bv(idx[0], idx[1], idx[2], 4)};
@@ -2876,6 +3203,15 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
   bv(i, j, k, 3) = 0;
   bv(i, j, k, 4) = p;
   bv(i, j, k, 5) = t_wall;
+
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      real y_wall[MAX_SPEC_NUMBER];
+      gather_species_mass_fractions(sv, i, j, k, param, y_wall);
+      zone->temperature_ve(i, j, k) = tve_wall;
+      sv(i, j, k, param->i_eve) = compute_mixture_ve_energy(tve_wall, y_wall, param);
+    }
+  }
 
   if (wall->if_blow_shock_wave && step >= 0 && step <= 50) {
     gxl::Matrix<real, 3, 3, 1> bdJin;
@@ -2977,7 +3313,8 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
   compute_cv_from_bv_1_point<mix_model>(zone, param, i, j, k);
 
   for (int g = 1; g <= ngg; ++g) {
-    const int i_in[]{i - g * dir[0], j - g * dir[1], k - g * dir[2]};
+    int i_in[]{i - g * dir[0], j - g * dir[1], k - g * dir[2]};
+    project_to_interior(i_in);
     const int i_gh[]{i + g * dir[0], j + g * dir[1], k + g * dir[2]};
 
     const real p_i{bv(i_in[0], i_in[1], i_in[2], 4)};
@@ -2988,7 +3325,28 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
         wall->thermal_type == Wall::ThermalType::equilibrium_radiation) {
       t_g = 2 * t_wall - t_i;    // 0.5*(t_i+t_g)=t_w
       if (t_g <= 0.1 * t_wall) { // improve stability
-        t_g = t_wall;
+        if constexpr (kTwoTemperature) {
+          t_g = 0.1 * t_wall;
+        } else {
+          t_g = t_wall;
+        }
+      }
+    }
+
+    real tve_g{t_g};
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        const real tve_i = zone->temperature_ve(i_in[0], i_in[1], i_in[2]) > 0.0 ?
+                           zone->temperature_ve(i_in[0], i_in[1], i_in[2]) : t_i;
+        tve_g = tve_i;
+        if (wall->thermal_type == Wall::ThermalType::isothermal ||
+            wall->thermal_type == Wall::ThermalType::equilibrium_radiation) {
+          tve_g = 2 * tve_wall - tve_i;
+          const real tve_floor = 0.1 * max(tve_wall, static_cast<real>(1.0));
+          if (tve_g <= tve_floor) {
+            tve_g = tve_floor;
+          }
+        }
       }
     }
 
@@ -3018,6 +3376,15 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
     bv(i_gh[0], i_gh[1], i_gh[2], 3) = -bv(i_in[0], i_in[1], i_in[2], 3);
     bv(i_gh[0], i_gh[1], i_gh[2], 4) = p_i;
     bv(i_gh[0], i_gh[1], i_gh[2], 5) = t_g;
+
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        real y_ghost[MAX_SPEC_NUMBER];
+        gather_species_mass_fractions(sv, i_gh[0], i_gh[1], i_gh[2], param, y_ghost);
+        zone->temperature_ve(i_gh[0], i_gh[1], i_gh[2]) = tve_g;
+        sv(i_gh[0], i_gh[1], i_gh[2], param->i_eve) = compute_mixture_ve_energy(tve_g, y_ghost, param);
+      }
+    }
 
     if (param->n_ps > 0) {
       const int i_ps{param->i_ps};
@@ -3491,6 +3858,27 @@ template<MixtureModel mix_model> void DBoundCond::apply_boundary_conditions(cons
   // Boundary conditions are applied in the order of priority, which with higher priority is applied later.
   // Finally, the communication between faces will be carried out after these bc applied
   // Priority: (-1 - inner faces >) 2-wall > 3-symmetry > 5-inflow = 7-subsonic inflow > 6-outflow = 9-back pressure > 4-farfield
+
+  // 4-farfield
+  for (size_t l = 0; l < n_farfield; l++) {
+    const auto nb = farfield_info[l].n_boundary;
+    for (size_t i = 0; i < nb; i++) {
+      auto [i_zone, i_face] = farfield_info[l].boundary[i];
+      if (i_zone != block.block_id) {
+        continue;
+      }
+      const auto &h_f = block.boundary[i_face];
+      const auto ngg = block.ngg;
+      uint tpb[3], bpg[3];
+      for (size_t j = 0; j < 3; j++) {
+        auto n_point = h_f.range_end[j] - h_f.range_start[j] + 1;
+        tpb[j] = n_point <= 2 * ngg + 1 ? 1 : 16;
+        bpg[j] = (n_point - 1) / tpb[j] + 1;
+      }
+      dim3 TPB{tpb[0], tpb[1], tpb[2]}, BPG{bpg[0], bpg[1], bpg[2]};
+      apply_farfield<mix_model> <<<BPG, TPB>>>(field.d_ptr, &farfield[l], i_face, param);
+    }
+  }
 
   // 6-outflow
   for (size_t l = 0; l < n_outflow; l++) {

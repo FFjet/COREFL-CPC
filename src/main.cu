@@ -32,6 +32,13 @@ int main(int argc, char *argv[]) {
     driver.initialize_computation();
     simulate(driver);
   } else {
+    if constexpr (cfd::kTwoTemperature) {
+      if (parameter.get_int("myid") == 0) {
+        printf("Two-temperature mode is only available for species-based mixture simulations.\n");
+      }
+      MPI_Finalize();
+      return 1;
+    }
     // Air simulation
     // Laminar and air
     cfd::Driver<MixtureModel::Air> driver(parameter, mesh);

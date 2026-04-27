@@ -5,6 +5,7 @@
 #include "BoundaryIO.h"
 #include "Monitor.cuh"
 #include "Parallel.h"
+#include "PostProcess.h"
 #include "SinglePointStat.cuh"
 
 namespace cfd {
@@ -112,7 +113,7 @@ template<MixtureModel mix_model> void IOManager<mix_model>::manage_output(int st
       write_rng(mesh, parameter, field);
     if (if_collect_statistics && step > collect_statistics_iter_start)
       stat_collector.export_statistical_data(param);
-    // post_process(driver);
+    post_process(mesh, field, parameter, param);
     if (if_monitor_points)
       monitor.output_point_monitors();
     // if (parameter.get_bool("sponge_layer")) {

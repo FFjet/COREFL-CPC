@@ -21,14 +21,14 @@ __global__ void finite_rate_chemistry_1(DZone *zone, const DParameter *param);
 
 __device__ void finite_rate_chemistry(DZone *zone, int i, int j, int k, const DParameter *param);
 
-__device__ void forward_reaction_rate(real t, real *kf, const real *concentration, const DParameter *param);
+__device__ void forward_reaction_rate(real t, real tve, real *kf, const real *concentration, const DParameter *param);
 
 __device__ void forward_reaction_rate_1(real t, real *kf, const real *concentration);
 
 __host__ __device__ real arrhenius(real t, real A, real b, real Ea);
 
-__device__ void backward_reaction_rate(real t, const real *kf, const real *concentration, const DParameter *param,
-  real *kb);
+__device__ void backward_reaction_rate(real t, real tve, const real *kf, const real *concentration,
+                                       const DParameter *param, real *kb);
 
 __device__ void backward_reaction_rate_1(real t, const real *kf, real *kb, const DParameter *param);
 

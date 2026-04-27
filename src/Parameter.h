@@ -153,6 +153,7 @@ static const std::map<std::string, int> VNsDefault /*short for Variable Names*/{
   {"MIXTUREFRACTIONVARIANCE", 9},
   // In the future, SA may be implemented, let us temporarily name the variable to be "nuTilde"
   {"NUTILDE", 10},
+  {"EVE", 11},
 
   // Some available variables
   {"MACH", 51},
@@ -161,5 +162,7 @@ static const std::map<std::string, int> VNsDefault /*short for Variable Names*/{
   {"SCALARDISSIPATIONRATE", 54},
   {"QCRITERIA", 55},
   {"SHOCKSENSOR", 56},
+  {"TVE", 57},
+  {"KAPPAVE", 58},
 };
 }

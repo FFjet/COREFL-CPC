@@ -72,6 +72,18 @@ __global__ void cfd::local_time_step_without_reaction(DZone *zone, DParameter *p
     max_diffuse_vel = max(max_diffuse_vel,
                           zone->thermal_conductivity(i, j, k) * iRho * zone->gamma(i, j, k) / cp);
     max_diffuse_vel = max(max_diffuse_vel, max_rhoD * iRho);
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        real cv_ve{};
+        const real tve = zone->temperature_ve(i, j, k) > 0.0 ? zone->temperature_ve(i, j, k) :
+                         max(zone->bv(i, j, k, 5), static_cast<real>(1.0));
+        real y[MAX_SPEC_NUMBER];
+        gather_species_mass_fractions(zone->sv, i, j, k, param, y);
+        compute_mixture_ve_energy(tve, y, param, &cv_ve);
+        max_diffuse_vel = max(max_diffuse_vel,
+                              zone->thermal_conductivity_ve(i, j, k) * iRho / max(cv_ve, static_cast<real>(1e-8)));
+      }
+    }
 
     max_spectral_radius = max(max_spectral_radius, max_length * max_length * max_diffuse_vel);
   }

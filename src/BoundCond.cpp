@@ -6,6 +6,46 @@
 #include <random>
 #include <algorithm>
 
+namespace {
+std::pair<real, real> compute_boundary_gamma_and_sound_speed(
+  const cfd::Species &spec, int n_spec, int i_eve, real temperature, const real *sv, real mw) {
+  real gamma = cfd::gamma_air;
+  if (n_spec > 0) {
+    std::vector<real> cp_species(n_spec, 0);
+    spec.compute_cp(temperature, cp_species.data());
+    real cp_mix{0};
+    real cv_mix{0};
+    real cv_ve_eq{0};
+    for (int i = 0; i < n_spec; ++i) {
+      const auto yi = sv[i];
+      const auto gas_const_i = cfd::R_u / spec.mw[i];
+      cp_mix += yi * cp_species[i];
+      cv_mix += yi * (cp_species[i] - gas_const_i);
+      if constexpr (cfd::kTwoTemperature) {
+        if (i_eve >= 0) {
+          cv_ve_eq += yi * spec.compute_ve_cv(i, temperature);
+        }
+      }
+    }
+
+    if constexpr (cfd::kTwoTemperature) {
+      if (i_eve >= 0) {
+        const auto cp_tr = cp_mix - cv_ve_eq;
+        const auto cv_tr = cv_mix - cv_ve_eq;
+        gamma = cp_tr / std::max(cv_tr, static_cast<real>(1e-12));
+      } else {
+        gamma = cp_mix / std::max(cv_mix, static_cast<real>(1e-12));
+      }
+    } else {
+      gamma = cp_mix / std::max(cv_mix, static_cast<real>(1e-12));
+    }
+  }
+
+  const auto c = std::sqrt(std::max(gamma * cfd::R_u / mw * temperature, static_cast<real>(1e-12)));
+  return {gamma, c};
+}
+}
+
 cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &parameter) {
   auto &info = parameter.get_struct(inflow_name);
   label = std::get<int>(info.at("label"));
@@ -23,6 +63,7 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
 
   const int n_scalar = parameter.get_int("n_scalar");
   const int n_spec{spec.n_spec};
+  const int i_eve = parameter.get_int("i_eve");
   real gamma{gamma_air};
   real c;
   if (inflow_type == 2) {
@@ -41,12 +82,24 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
     velocity = std::sqrt(u * u + v * v + w * w);
     pressure = var_info[4];
     temperature = var_info[5];
+    if constexpr (kTwoTemperature) {
+      if (i_eve >= 0) {
+        temperature_ve = info.contains("Tve") ? std::get<real>(info.at("Tve")) : temperature;
+      }
+    }
     sv = new real[n_scalar];
     if (n_spec > 0) {
       mw = 0;
+      std::vector<real> yk(n_spec, 0);
       for (int i = 0; i < n_spec; ++i) {
         sv[i] = var_info[6 + i];
+        yk[i] = sv[i];
         mw += var_info[6 + i] / spec.mw[i];
+      }
+      if constexpr (kTwoTemperature) {
+        if (i_eve >= 0) {
+          sv[i_eve] = spec.compute_mixture_ve_energy(temperature_ve, yk);
+        }
       }
       mw = 1 / mw;
       viscosity = compute_viscosity(temperature, mw, sv, spec);
@@ -54,17 +107,7 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
       viscosity = Sutherland(temperature);
     }
     reynolds_number = density * velocity / viscosity;
-    if (n_spec > 0) {
-      std::vector<real> cpi(n_spec, 0);
-      spec.compute_cp(temperature, cpi.data());
-      real cp{0}, cv{0};
-      for (size_t i = 0; i < n_spec; ++i) {
-        cp += sv[i] * cpi[i];
-        cv += sv[i] * (cpi[i] - R_u / spec.mw[i]);
-      }
-      gamma = cp / cv; // specific heat ratio
-    }
-    c = std::sqrt(gamma * R_u / mw * temperature); // speed of sound
+    std::tie(gamma, c) = compute_boundary_gamma_and_sound_speed(spec, n_spec, i_eve, temperature, sv, mw);
 
     density_lower = var_info[7 + n_spec];
     u_lower = var_info[8 + n_spec];
@@ -72,9 +115,21 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
     w_lower = var_info[10 + n_spec];
     p_lower = var_info[11 + n_spec];
     t_lower = var_info[12 + n_spec];
+    if constexpr (kTwoTemperature) {
+      if (i_eve >= 0) {
+        tve_lower = info.contains("Tve_lower") ? std::get<real>(info.at("Tve_lower")) : t_lower;
+      }
+    }
     sv_lower = new real[n_scalar];
+    std::vector<real> yk_lower(n_spec, 0);
     for (int i = 0; i < n_spec; ++i) {
       sv_lower[i] = var_info[13 + n_spec + i];
+      yk_lower[i] = sv_lower[i];
+    }
+    if constexpr (kTwoTemperature) {
+      if (i_eve >= 0) {
+        sv_lower[i_eve] = spec.compute_mixture_ve_energy(tve_lower, yk_lower);
+      }
     }
     if (n_spec > 0) {
       mw_lower = 0;
@@ -165,6 +220,9 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
     if (info.find("mach") != info.end()) mach = std::get<real>(info.at("mach"));
     if (info.find("pressure") != info.end()) pressure = std::get<real>(info.at("pressure"));
     if (info.find("temperature") != info.end()) temperature = std::get<real>(info.at("temperature"));
+    if constexpr (kTwoTemperature) {
+      if (info.find("Tve") != info.end()) temperature_ve = std::get<real>(info.at("Tve"));
+    }
     if (info.find("velocity") != info.end()) velocity = std::get<real>(info.at("velocity"));
     if (info.find("density") != info.end()) density = std::get<real>(info.at("density"));
     if (info.find("aoa") != info.end()) aoa = std::get<real>(info.at("aoa"));
@@ -195,24 +253,21 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
       // The temperature is not given, thus the density and pressure are given
       temperature = pressure * mw / (density * R_u);
     }
+    if constexpr (kTwoTemperature) {
+      if (n_spec > 0 && i_eve >= 0) {
+        if (temperature_ve < 0) temperature_ve = temperature;
+        std::vector<real> yk(n_spec, 0);
+        for (int i = 0; i < n_spec; ++i) yk[i] = sv[i];
+        sv[i_eve] = spec.compute_mixture_ve_energy(temperature_ve, yk);
+      }
+    }
     if (n_spec > 0) {
       viscosity = compute_viscosity(temperature, mw, sv, spec);
     } else {
       viscosity = Sutherland(temperature);
     }
 
-    if (n_spec > 0) {
-      std::vector<real> cpi(n_spec, 0);
-      spec.compute_cp(temperature, cpi.data());
-      real cp{0}, cv{0};
-      for (size_t i = 0; i < n_spec; ++i) {
-        cp += sv[i] * cpi[i];
-        cv += sv[i] * (cpi[i] - R_u / spec.mw[i]);
-      }
-      gamma = cp / cv; // specific heat ratio
-    }
-
-    c = std::sqrt(gamma * R_u / mw * temperature); // speed of sound
+    std::tie(gamma, c) = compute_boundary_gamma_and_sound_speed(spec, n_spec, i_eve, temperature, sv, mw);
 
     if (mach < 0) {
       // The mach number is not given. The velocity magnitude should be given
@@ -385,6 +440,9 @@ cfd::Inflow::Inflow(const std::string &inflow_name, const Species &spec, const P
   if (info.find("mach") != info.end()) mach = std::get<real>(info.at("mach"));
   if (info.find("pressure") != info.end()) pressure = std::get<real>(info.at("pressure"));
   if (info.find("temperature") != info.end()) temperature = std::get<real>(info.at("temperature"));
+  if constexpr (kTwoTemperature) {
+    if (info.find("Tve") != info.end()) temperature_ve = std::get<real>(info.at("Tve"));
+  }
   if (info.find("velocity") != info.end()) velocity = std::get<real>(info.at("velocity"));
   if (info.find("density") != info.end()) density = std::get<real>(info.at("density"));
   if (info.find("u") != info.end()) u = std::get<real>(info.at("u"));
@@ -398,6 +456,7 @@ cfd::Inflow::Inflow(const std::string &inflow_name, const Species &spec, const P
     sv[i] = 0;
   }
   const int n_spec{spec.n_spec};
+  const int i_eve = parameter.get_int("i_eve");
 
   if (n_spec > 0) {
     // Assign the species mass fraction to the corresponding position.
@@ -416,25 +475,22 @@ cfd::Inflow::Inflow(const std::string &inflow_name, const Species &spec, const P
     // The temperature is not given, thus the density and pressure are given
     temperature = pressure * mw / (density * R_u);
   }
+  if constexpr (kTwoTemperature) {
+    if (n_spec > 0 && i_eve >= 0) {
+      if (temperature_ve < 0) temperature_ve = temperature;
+      std::vector<real> yk(n_spec, 0);
+      for (int i = 0; i < n_spec; ++i) yk[i] = sv[i];
+      sv[i_eve] = spec.compute_mixture_ve_energy(temperature_ve, yk);
+    }
+  }
   if (n_spec > 0) {
     viscosity = compute_viscosity(temperature, mw, sv, spec);
   } else {
     viscosity = Sutherland(temperature);
   }
 
-  real gamma{gamma_air};
-  if (n_spec > 0) {
-    std::vector<real> cpi(n_spec, 0);
-    spec.compute_cp(temperature, cpi.data());
-    real cp{0}, cv{0};
-    for (size_t i = 0; i < n_spec; ++i) {
-      cp += sv[i] * cpi[i];
-      cv += sv[i] * (cpi[i] - R_u / spec.mw[i]);
-    }
-    gamma = cp / cv; // specific heat ratio
-  }
-
-  const real c{std::sqrt(gamma * R_u / mw * temperature)}; // speed of sound
+  real gamma{gamma_air}, c{};
+  std::tie(gamma, c) = compute_boundary_gamma_and_sound_speed(spec, n_spec, i_eve, temperature, sv, mw);
 
   if (mach < 0) {
     // The mach number is not given. The velocity magnitude should be given
@@ -480,6 +536,11 @@ cfd::Inflow::Inflow(const std::string &inflow_name, const Species &spec, const P
 cfd::Wall::Wall(const std::map<std::string, std::variant<std::string, int, real>> &info, Parameter &parameter,
   const Species &spec) :
   label(std::get<int>(info.at("label"))) {
+  if constexpr (kTwoTemperature) {
+    if (info.contains("Tve")) {
+      temperature_ve = std::get<real>(info.at("Tve"));
+    }
+  }
   if (info.contains("thermal_type")) {
     if (std::get<std::string>(info.at("thermal_type")) == "isothermal")
       thermal_type = ThermalType::isothermal;
@@ -497,6 +558,9 @@ cfd::Wall::Wall(const std::map<std::string, std::variant<std::string, int, real>
       temperature = std::get<real>(info.at("temperature"));
     } else {
       printf("Isothermal wall does not specify wall temperature, is set as 300K in default.\n");
+    }
+    if constexpr (kTwoTemperature) {
+      if (temperature_ve < 0) temperature_ve = temperature;
     }
   } else if (thermal_type == ThermalType::equilibrium_radiation) {
     if (info.contains("emissivity")) {
@@ -630,6 +694,9 @@ cfd::FarField::FarField(const std::string &inflow_name, Species &spec, Parameter
   if (info.find("mach") != info.end()) mach = std::get<real>(info.at("mach"));
   if (info.find("pressure") != info.end()) pressure = std::get<real>(info.at("pressure"));
   if (info.find("temperature") != info.end()) temperature = std::get<real>(info.at("temperature"));
+  if constexpr (kTwoTemperature) {
+    if (info.find("Tve") != info.end()) temperature_ve = std::get<real>(info.at("Tve"));
+  }
   if (info.find("velocity") != info.end()) velocity = std::get<real>(info.at("velocity"));
   if (info.find("density") != info.end()) density = std::get<real>(info.at("density"));
   if (info.find("u") != info.end()) u = std::get<real>(info.at("u"));
@@ -643,6 +710,7 @@ cfd::FarField::FarField(const std::string &inflow_name, Species &spec, Parameter
     sv[i] = 0;
   }
   const int n_spec{spec.n_spec};
+  const int i_eve = parameter.get_int("i_eve");
   if (n_spec > 0) {
     // Assign the species mass fraction to the corresponding position.
     // Should be done after knowing the order of species.
@@ -660,25 +728,22 @@ cfd::FarField::FarField(const std::string &inflow_name, Species &spec, Parameter
     // The temperature is not given, thus the density and pressure are given
     temperature = pressure * mw / (density * R_u);
   }
+  if constexpr (kTwoTemperature) {
+    if (n_spec > 0 && i_eve >= 0) {
+      if (temperature_ve < 0) temperature_ve = temperature;
+      std::vector<real> yk(n_spec, 0);
+      for (int i = 0; i < n_spec; ++i) yk[i] = sv[i];
+      sv[i_eve] = spec.compute_mixture_ve_energy(temperature_ve, yk);
+    }
+  }
   if (n_spec > 0) {
     viscosity = compute_viscosity(temperature, mw, sv, spec);
   } else {
     viscosity = Sutherland(temperature);
   }
 
-  //  real gamma{gamma_air};
-  if (n_spec > 0) {
-    std::vector<real> cpi(n_spec, 0);
-    spec.compute_cp(temperature, cpi.data());
-    real cp{0}, cv{0};
-    for (size_t i = 0; i < n_spec; ++i) {
-      cp += sv[i] * cpi[i];
-      cv += sv[i] * (cpi[i] - R_u / spec.mw[i]);
-    }
-    specific_heat_ratio = cp / cv; // specific heat ratio
-  }
-
-  acoustic_speed = std::sqrt(specific_heat_ratio * R_u / mw * temperature);
+  std::tie(specific_heat_ratio, acoustic_speed) =
+      compute_boundary_gamma_and_sound_speed(spec, n_spec, i_eve, temperature, sv, mw);
   //  const real c{std::sqrt(gamma * R_u / mw * temperature)};  // speed of sound
 
   if (mach < 0) {
@@ -700,6 +765,9 @@ cfd::FarField::FarField(const std::string &inflow_name, Species &spec, Parameter
     // The density is not given, compute it from the equation of state
     density = pressure * mw / (R_u * temperature);
   }
+  if (reynolds_number < 0) {
+    reynolds_number = density * velocity / viscosity;
+  }
   entropy = pressure / pow(density, specific_heat_ratio);
 
   if (parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) {
@@ -720,6 +788,9 @@ cfd::FarField::FarField(const std::string &inflow_name, Species &spec, Parameter
   if (parameter.get_string("reference_state") == "farfield") {
     parameter.update_parameter("rho_inf", density);
     parameter.update_parameter("v_inf", velocity);
+    parameter.update_parameter("ux_inf", u);
+    parameter.update_parameter("uy_inf", v);
+    parameter.update_parameter("uz_inf", w);
     parameter.update_parameter("p_inf", pressure);
     parameter.update_parameter("T_inf", temperature);
     parameter.update_parameter("M_inf", mach);

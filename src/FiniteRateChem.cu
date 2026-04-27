@@ -16,6 +16,20 @@ __device__ __forceinline__ real pow10_real(real p) {
   return exp(kLn10 * p);
 }
 
+__device__ __forceinline__ real compute_two_temperature_chemical_source(const DZone *zone, int i, int j, int k,
+  const DParameter *param, const real *omega, real t) {
+  if (!param->two_temperature || param->i_eve < 0) return 0.0;
+
+  real tve = zone->temperature_ve(i, j, k);
+  if (tve <= 0.0) tve = max(t, static_cast<real>(1.0));
+
+  real source = 0.0;
+  for (int l = 0; l < param->n_spec; ++l) {
+    source += omega[l] * compute_ve_energy(l, tve, param);
+  }
+  return source;
+}
+
 __device__ void chemical_source_hardCoded1(real t, const real * __restrict__ c,
   const DParameter * __restrict__ param, real * __restrict__ omega_d, real * __restrict__ omega) {
   // According to chemistry/2004-Li-IntJ.Chem.Kinet.inp
@@ -1368,6 +1382,10 @@ __global__ void finite_rate_chemistry_1(DZone *zone, const DParameter *param) {
     if (sv(i, j, k, l) > 1e-25 && abs(omega_d[l]) > 1e-25)
       time_scale = min(time_scale, abs(density * sv(i, j, k, l) / omega_d[l]));
   }
+  if (param->i_eve >= 0) {
+    zone->dq(i, j, k, 5 + param->i_eve) += zone->jac(i, j, k) *
+                                           compute_two_temperature_chemical_source(zone, i, j, k, param, omega, t);
+  }
   zone->reaction_timeScale(i, j, k) = time_scale;
 
   // If implicit treat
@@ -1429,9 +1447,11 @@ __global__ void finite_rate_chemistry(DZone *zone, const DParameter *param) {
     chemical_source_1(q1, q2, omega_d, omega);
   } else {
     // generic mechanisms
-    forward_reaction_rate(t, kf, c, param);
+    const real tve = param->two_temperature ? max(zone->temperature_ve(i, j, k), static_cast<real>(1.0))
+                                            : t;
+    forward_reaction_rate(t, tve, kf, c, param);
 
-    backward_reaction_rate(t, kf, c, param, kb);
+    backward_reaction_rate(t, tve, kf, c, param, kb);
 
     // compute the rate of progress
     rate_of_progress(kf, kb, c, q, q1, q2, param);
@@ -1445,6 +1465,10 @@ __global__ void finite_rate_chemistry(DZone *zone, const DParameter *param) {
     zone->dq(i, j, k, l + 5) += zone->jac(i, j, k) * omega[l];
     if (sv(i, j, k, l) > 1e-25 && abs(omega_d[l]) > 1e-25)
       time_scale = min(time_scale, abs(density * sv(i, j, k, l) / omega_d[l]));
+  }
+  if (param->i_eve >= 0) {
+    zone->dq(i, j, k, 5 + param->i_eve) += zone->jac(i, j, k) *
+                                           compute_two_temperature_chemical_source(zone, i, j, k, param, omega, t);
   }
   zone->reaction_timeScale(i, j, k) = time_scale;
 
@@ -1463,17 +1487,34 @@ __global__ void finite_rate_chemistry(DZone *zone, const DParameter *param) {
   }
 }
 
-__device__ void forward_reaction_rate(real t, real *kf, const real *concentration, const DParameter *param) {
+__device__ __forceinline__ real smooth_reaction_temperature(real trx) {
+  constexpr real T_min = 800.0;
+  constexpr real epsilon = 80.0;
+  return 0.5 * (trx + T_min + sqrt((trx - T_min) * (trx - T_min) + epsilon * epsilon));
+}
+
+__device__ __forceinline__ real reaction_temperature(real t, real tve, real a, real b,
+  const DParameter *param) {
+  if (!param->two_temperature_reaction_temperature) return t;
+  const real t_safe = max(t, static_cast<real>(1.0));
+  const real tve_safe = max(tve, static_cast<real>(1.0));
+  const real trx = pow(t_safe, a) * pow(tve_safe, b);
+  return smooth_reaction_temperature(trx);
+}
+
+__device__ void forward_reaction_rate(real t, real tve, real *kf, const real *concentration, const DParameter *param) {
   const auto A = param->A, b = param->b, Ea = param->Ea;
   const auto type = param->reac_type;
   const auto A2 = param->A2, b2 = param->b2, Ea2 = param->Ea2;
   const auto &third_body_coeff = param->third_body_coeff;
   const auto alpha = param->troe_alpha, t3 = param->troe_t3, t1 = param->troe_t1, t2 = param->troe_t2;
+  const auto tcf_a = param->tcf_a, tcf_b = param->tcf_b;
   for (int i = 0; i < param->n_reac; ++i) {
-    kf[i] = arrhenius(t, A[i], b[i], Ea[i]);
+    const real thf = reaction_temperature(t, tve, tcf_a[i], tcf_b[i], param);
+    kf[i] = arrhenius(thf, A[i], b[i], Ea[i]);
     if (type[i] == 3) {
       // Duplicate reaction
-      kf[i] += arrhenius(t, A2[i], b2[i], Ea2[i]);
+      kf[i] += arrhenius(thf, A2[i], b2[i], Ea2[i]);
     } else if (type[i] > 3) {
       real cc{0};
       for (int l = 0; l < param->n_spec; ++l) {
@@ -1483,7 +1524,7 @@ __device__ void forward_reaction_rate(real t, real *kf, const real *concentratio
         // Third body reaction
         kf[i] *= cc;
       } else {
-        const real kf_low = arrhenius(t, A2[i], b2[i], Ea2[i]);
+        const real kf_low = arrhenius(thf, A2[i], b2[i], Ea2[i]);
         const real kf_high = kf[i];
         if (kf_high < 1e-25 && kf_low < 1e-25) {
           // If both kf_high and kf_low are too small, set kf to zero
@@ -1494,9 +1535,9 @@ __device__ void forward_reaction_rate(real t, real *kf, const real *concentratio
         real F = 1.0;
         if (type[i] > 5) {
           // Troe form
-          real f_cent = (1 - alpha[i]) * std::exp(-t / t3[i]) + alpha[i] * std::exp(-t / t1[i]);
+          real f_cent = (1 - alpha[i]) * std::exp(-thf / t3[i]) + alpha[i] * std::exp(-thf / t1[i]);
           if (type[i] == 7) {
-            f_cent += std::exp(-t2[i] / t);
+            f_cent += std::exp(-t2[i] / thf);
           }
           const real logFc = std::log10(f_cent);
           const real c = -0.4 - 0.67 * logFc;
@@ -1516,8 +1557,43 @@ __device__ real arrhenius(real t, real A, real b, real Ea) {
   return A * std::pow(t, b) * std::exp(-Ea / t);
 }
 
-__device__ void backward_reaction_rate(real t, const real *kf, const real *concentration, const DParameter *param,
-  real *kb) {
+__device__ void backward_reaction_rate(real t, real tve, const real *kf, const real *concentration,
+  const DParameter *param, real *kb) {
+  const auto tcb_a = param->tcb_a, tcb_b = param->tcb_b;
+  if (param->two_temperature_reaction_temperature) {
+    const auto &stoi_f = param->stoi_f, &stoi_b = param->stoi_b;
+    for (int i = 0; i < param->n_reac; ++i) {
+      const real thb = reaction_temperature(t, tve, tcb_a[i], tcb_b[i], param);
+      if (param->reac_type[i] == 0) {
+        kb[i] = 0;
+        continue;
+      }
+      if (param->rev_type[i] == 1) {
+        kb[i] = arrhenius(thb, param->A2[i], param->b2[i], param->Ea2[i]);
+        if (param->reac_type[i] == 4) {
+          real cc{0};
+          for (int l = 0; l < param->n_spec; ++l) {
+            cc += concentration[l] * param->third_body_coeff(i, l);
+          }
+          kb[i] *= cc;
+        }
+        continue;
+      }
+
+      real gibbs_rt[MAX_SPEC_NUMBER];
+      compute_gibbs_div_rt(thb, param, gibbs_rt);
+      constexpr real temp_p = p_atm / R_u * 1e-3;
+      const real temp_t = temp_p / thb;
+      real d_gibbs{0};
+      for (int l = 0; l < param->n_spec; ++l) {
+        d_gibbs += gibbs_rt[l] * (stoi_b(i, l) - stoi_f(i, l));
+      }
+      const real kc{std::pow(temp_t, param->reac_order[i]) * std::exp(-d_gibbs)};
+      kb[i] = kf[i] / kc;
+    }
+    return;
+  }
+
   int n_gibbs{param->n_reac};
   for (int i = 0; i < param->n_reac; ++i) {
     if (param->reac_type[i] == 0) {

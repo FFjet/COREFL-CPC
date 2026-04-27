@@ -6,14 +6,55 @@ __device__ void compute_temperature_and_pressure(int i, int j, int k, const DPar
   const int n_spec = param->n_spec;
   auto &Y = zone->sv;
   auto &bv = zone->bv;
+  const real density = bv(i, j, k, 0);
+
+  if (param->print_nan && (!isfinite(total_energy) || !isfinite(density) || density <= 0.0)) {
+    printf("bad primitive recovery input: cell=(%d,%d,%d) rho=%e rhoE=%e u=(%e,%e,%e)\n", i, j, k, density,
+           total_energy, bv(i, j, k, 1), bv(i, j, k, 2), bv(i, j, k, 3));
+  }
 
   real gas_const{0};
   for (int l = 0; l < n_spec; ++l) {
     gas_const += Y(i, j, k, l) * param->gas_const[l];
   }
   const real e =
-      total_energy / bv(i, j, k, 0) - 0.5 * (bv(i, j, k, 1) * bv(i, j, k, 1) + bv(i, j, k, 2) * bv(i, j, k, 2) +
+      total_energy / density - 0.5 * (bv(i, j, k, 1) * bv(i, j, k, 1) + bv(i, j, k, 2) * bv(i, j, k, 2) +
                                              bv(i, j, k, 3) * bv(i, j, k, 3));
+
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      real y[MAX_SPEC_NUMBER];
+      gather_species_mass_fractions(Y, i, j, k, param, y);
+      const real eve = max(zone->sv(i, j, k, param->i_eve), static_cast<real>(0.0));
+      real tve = zone->temperature_ve(i, j, k);
+      if (tve <= 0) tve = max(bv(i, j, k, 5), static_cast<real>(1.0));
+      tve = invert_tve_from_eve(eve, y, tve, param);
+      zone->temperature_ve(i, j, k) = tve;
+
+      real err{1}, t{max(bv(i, j, k, 5), static_cast<real>(1.0))};
+      constexpr int max_iter{1000};
+      constexpr real eps{1e-5};
+      int iter = 0;
+      while (err > eps && iter++ < max_iter) {
+        real cv_tr{};
+        const real e_tr = compute_mixture_tr_energy(t, y, param, &cv_tr);
+        if (param->print_nan && (!isfinite(e_tr) || !isfinite(cv_tr) || cv_tr <= 0.0 || !isfinite(e - eve))) {
+          printf("bad 2T closure state: cell=(%d,%d,%d) e=%e eve=%e T=%e Tve=%e e_tr=%e cv_tr=%e\n", i, j, k, e, eve, t,
+                 tve, e_tr, cv_tr);
+        }
+        const real t1 = max(static_cast<real>(1.0), t - (e_tr - (e - eve)) / max(cv_tr, static_cast<real>(1e-8)));
+        if (param->print_nan && !isfinite(t1)) {
+          printf("non-finite 2T temperature iteration: cell=(%d,%d,%d) rho=%e rhoE=%e e=%e eve=%e T=%e Tve=%e\n", i, j, k,
+                 density, total_energy, e, eve, t, tve);
+        }
+        err = std::abs(1 - t1 / t);
+        t = t1;
+      }
+      bv(i, j, k, 5) = t;
+      bv(i, j, k, 4) = density * t * gas_const;
+      return;
+    }
+  }
 
   real err{1}, t{bv(i, j, k, 5)};
   constexpr int max_iter{1000};

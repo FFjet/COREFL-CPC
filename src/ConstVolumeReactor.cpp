@@ -1,10 +1,18 @@
 #include "ConstVolumeReactor.h"
 #include "Constants.h"
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include "gxl_lib/Math.hpp"
 
 namespace cfd {
+#ifdef Combustion2Part
+namespace {
+real compute_mixture_vib_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
+                                     real *cv_v);
+}
+#endif
+
 void const_volume_reactor(Parameter &parameter) {
 #ifdef Combustion2Part
   const Species species(parameter);
@@ -55,6 +63,267 @@ void const_volume_reactor(Parameter &parameter) {
   const real rho = p / (T * R_u * imw);
   for (int i = 0; i < ns; ++i) {
     rhoY[i] = yk[i] * rho;
+  }
+
+  const bool use_two_temperature =
+      kTwoTemperature && species.has_two_temperature_data &&
+      (!condition.contains("two_temperature") || std::get<int>(condition.at("two_temperature")) != 0);
+
+  if (use_two_temperature) {
+    const real end_time = std::get<real>(condition.at("end_time"));
+    const real dt = std::get<real>(condition.at("dt"));
+    const int mechanism = std::get<int>(condition.at("mechanism"));
+    const int conserve_mass_corefl = std::get<int>(condition.at("conserve_mass_corefl"));
+    const int file_frequency = std::get<int>(condition.at("file_frequency"));
+    const int screen_frequency = std::get<int>(condition.at("screen_frequency"));
+    const int effective_advance_scheme =
+        (std::get<int>(condition.at("advance_scheme")) == 0 || std::get<int>(condition.at("advance_scheme")) == 3)
+            ? std::get<int>(condition.at("advance_scheme"))
+            : 3;
+    const int enable_chemical_source =
+        condition.contains("enable_chemical_source") ? std::get<int>(condition.at("enable_chemical_source"))
+                                                     : parameter.get_int("reaction");
+    const int enable_vt_relaxation =
+        condition.contains("enable_vt_relaxation") ? std::get<int>(condition.at("enable_vt_relaxation")) : 1;
+    real Tve = condition.contains("initial_temperature_ve") ? std::get<real>(condition.at("initial_temperature_ve")) : T;
+
+    std::vector<real> hk_2t(ns, 0), cpk_2t(ns, 0);
+    species.compute_enthalpy_and_cp(T, hk_2t.data(), cpk_2t.data());
+    const real eve_eq = species.compute_mixture_ve_energy(T, yk);
+    real eve = species.compute_mixture_ve_energy(Tve, yk);
+    real E = 0.0;
+    for (int i = 0; i < ns; ++i) {
+      E += yk[i] * (hk_2t[i] - R_u / species.mw[i] * T);
+    }
+    E = E - eve_eq + eve;
+    real rho_eve = rho * eve;
+
+    const int nr = reaction.n_reac;
+    auto make_sources = [&]() {
+      ReactorSources src;
+      src.q1.assign(nr, 0.0);
+      src.q2.assign(nr, 0.0);
+      src.omega_d.assign(ns, 0.0);
+      src.omega.assign(ns, 0.0);
+      return src;
+    };
+
+    auto normalize_state = [&](std::vector<real> &rhoY_state, std::vector<real> &y_state, real &imw_state) {
+      real sum_rho = 0.0;
+      for (int l = 0; l < ns; ++l) {
+        if (rhoY_state[l] < 0.0) rhoY_state[l] = 0.0;
+        sum_rho += rhoY_state[l];
+      }
+      if (sum_rho <= 1e-30) {
+        rhoY_state = rhoY;
+        sum_rho = rho;
+      }
+      imw_state = 0.0;
+      for (int l = 0; l < ns; ++l) {
+        if (conserve_mass_corefl) {
+          y_state[l] = rhoY_state[l] / sum_rho;
+          rhoY_state[l] = y_state[l] * rho;
+        } else {
+          y_state[l] = rhoY_state[l] / rho;
+        }
+        imw_state += y_state[l] / species.mw[l];
+      }
+    };
+
+    auto recover_temperatures = [&](const std::vector<real> &y_state, real imw_state, real &t_state, real &tve_state,
+                                    real &p_state, real &eve_state, real rho_eve_state, real t_guess,
+                                    real tve_guess) {
+      eve_state = std::max(rho_eve_state / rho, static_cast<real>(0.0));
+      tve_state = species.invert_tve_from_eve(eve_state, y_state, tve_guess);
+      t_state = update_t_two_temperature(t_guess, species, y_state, E, eve_state);
+      p_state = rho * R_u * imw_state * t_state;
+    };
+
+    auto evaluate_sources = [&](real t_state, real tve_state, const std::vector<real> &rhoY_state,
+                                const std::vector<real> &y_state, ReactorSources &src) {
+      std::fill(src.q1.begin(), src.q1.end(), 0.0);
+      std::fill(src.q2.begin(), src.q2.end(), 0.0);
+      std::fill(src.omega_d.begin(), src.omega_d.end(), 0.0);
+      std::fill(src.omega.begin(), src.omega.end(), 0.0);
+      src.chemical_eve_source = 0.0;
+      src.vt_eve_source = 0.0;
+      src.eve_eq = species.compute_mixture_ve_energy(t_state, y_state);
+      src.tau_vt = 1e30;
+
+      if (enable_chemical_source && parameter.get_int("reaction") == 1) {
+        compute_src(mechanism, t_state, tve_state, species, reaction, rhoY_state, src.q1, src.q2, src.omega_d, src.omega);
+        src.chemical_eve_source = compute_two_temperature_chemical_source(tve_state, species, src.omega);
+      }
+      if (enable_vt_relaxation) {
+        src.vt_eve_source =
+            compute_vt_relaxation_source(rho, t_state, tve_state, y_state, species, &src.eve_eq, &src.tau_vt);
+      }
+    };
+
+    auto apply_lt_stage = [&](real dt_stage, std::vector<real> &rhoY_state, std::vector<real> &y_state,
+                              real &imw_state, real &t_state, real &tve_state, real &p_state, real &eve_state,
+                              real &rho_eve_state, ReactorSources &src) {
+      if (!enable_vt_relaxation || dt_stage <= 0.0) return;
+      evaluate_sources(t_state, tve_state, rhoY_state, y_state, src);
+      if (src.tau_vt >= 1e29 || !std::isfinite(src.tau_vt)) {
+        src.vt_eve_source = 0.0;
+        return;
+      }
+
+      const real ev_old = compute_mixture_vib_energy_host(tve_state, y_state, species, nullptr);
+      const real alpha = std::exp(-dt_stage / std::max(src.tau_vt, static_cast<real>(1e-30)));
+      const real ev_new = ev_old * alpha + src.eve_eq * (1.0 - alpha);
+      rho_eve_state = std::max(rho_eve_state + rho * (ev_new - ev_old), static_cast<real>(0.0));
+      recover_temperatures(y_state, imw_state, t_state, tve_state, p_state, eve_state, rho_eve_state, t_state,
+                           tve_state);
+      src.vt_eve_source = rho * (ev_new - ev_old) / std::max(dt_stage, static_cast<real>(1e-30));
+    };
+
+    auto write_state = [&](FILE *fp_state, real time_state, real t_state, real tve_state, real p_state, real eve_state,
+                           real rho_eve_state, const ReactorSources &src, int step_state, real imw_state,
+                           const std::vector<real> &y_state) {
+      fprintf(fp_state, "%.13e,%.13e,%.13e,%.13e,%.13e,%.13e,%.13e,%.13e,%.13e",
+              time_state, t_state, tve_state, p_state, eve_state, rho_eve_state, src.chemical_eve_source,
+              src.vt_eve_source, src.tau_vt);
+      if (mole_mass == 1) {
+        for (int l = 0; l < ns; ++l) {
+          const real xl = y_state[l] / (species.mw[l] * imw_state);
+          fprintf(fp_state, ",%.13e", xl);
+        }
+      } else {
+        for (int l = 0; l < ns; ++l) {
+          fprintf(fp_state, ",%.13e", y_state[l]);
+        }
+      }
+      fprintf(fp_state, ",%d\n", step_state);
+    };
+
+    auto check_finite_state = [&](const char *tag, int step_state, real time_state, const std::vector<real> &rhoY_state,
+                                  const std::vector<real> &y_state, real t_state, real tve_state, real p_state,
+                                  real eve_state, real rho_eve_state) {
+      bool ok = std::isfinite(t_state) && std::isfinite(tve_state) && std::isfinite(p_state) &&
+                std::isfinite(eve_state) && std::isfinite(rho_eve_state);
+      for (int l = 0; ok && l < ns; ++l) {
+        ok = std::isfinite(rhoY_state[l]) && std::isfinite(y_state[l]);
+      }
+      if (ok) return;
+
+      fprintf(stderr, "[2T-CVR] Non-finite state detected at %s, step=%d, time=%.13e\n", tag, step_state, time_state);
+      fprintf(stderr, "  T=%.13e, Tve=%.13e, p=%.13e, Eve=%.13e, rhoEve=%.13e, E=%.13e\n",
+              t_state, tve_state, p_state, eve_state, rho_eve_state, E);
+      for (int l = 0; l < ns; ++l) {
+        fprintf(stderr, "  spec[%d]=%s rhoY=%.13e Y=%.13e\n",
+                l, species.spec_name[l].c_str(), rhoY_state[l], y_state[l]);
+      }
+      fflush(stderr);
+      std::abort();
+    };
+
+    FILE *fp = fopen("const_volume_reactor_output.dat", "w");
+    fprintf(fp,
+            "variables=time(s),temperature(K),temperature_ve(K),pressure(Pa),Eve(J/kg),rhoEve(J/m3),src_eve_chem(J/m3/s),src_eve_vt(J/m3/s),tau_vt(s)");
+    if (mole_mass == 1) {
+      for (int l = 0; l < ns; ++l) {
+        fprintf(fp, ",X<sub>%s</sub>", species.spec_name[l].c_str());
+      }
+    } else {
+      for (int l = 0; l < ns; ++l) {
+        fprintf(fp, ",Y<sub>%s</sub>", species.spec_name[l].c_str());
+      }
+    }
+    fprintf(fp, ",step\n");
+
+    auto start = std::chrono::high_resolution_clock::now();
+    ReactorSources current_src = make_sources();
+    evaluate_sources(T, Tve, rhoY, yk, current_src);
+    write_state(fp, 0.0, T, Tve, p, eve, rho_eve, current_src, 0, imw, yk);
+
+    constexpr real rk_stage_dt_scale[3]{1.0, 0.25, 2.0 / 3.0};
+    real time = 0.0;
+    int step = 0;
+    while (time < end_time - 1e-30) {
+      const real dt_step = std::min(dt, end_time - time);
+
+      if (effective_advance_scheme == 0) {
+        evaluate_sources(T, Tve, rhoY, yk, current_src);
+        for (int l = 0; l < ns; ++l) {
+          rhoY[l] += current_src.omega[l] * dt_step;
+        }
+        rho_eve += current_src.chemical_eve_source * dt_step;
+        normalize_state(rhoY, yk, imw);
+        recover_temperatures(yk, imw, T, Tve, p, eve, rho_eve, T, Tve);
+        apply_lt_stage(dt_step, rhoY, yk, imw, T, Tve, p, eve, rho_eve, current_src);
+      } else {
+        const std::vector<real> rhoY0 = rhoY;
+        const real rho_eve0 = rho_eve;
+        const real T0 = T;
+        const real Tve0 = Tve;
+
+        ReactorSources src0 = make_sources();
+        ReactorSources src1 = make_sources();
+        ReactorSources src2 = make_sources();
+
+        evaluate_sources(T0, Tve0, rhoY0, yk, src0);
+
+        std::vector<real> rhoY1 = rhoY0;
+        for (int l = 0; l < ns; ++l) {
+          rhoY1[l] += dt_step * src0.omega[l];
+        }
+        real rho_eve1 = rho_eve0 + dt_step * src0.chemical_eve_source;
+        std::vector<real> y1 = yk;
+        real imw1 = imw;
+        real T1 = T0, Tve1 = Tve0, p1 = p, eve1 = eve;
+        normalize_state(rhoY1, y1, imw1);
+        recover_temperatures(y1, imw1, T1, Tve1, p1, eve1, rho_eve1, T0, Tve0);
+        check_finite_state("rk3-stage1-post-recover", step, time, rhoY1, y1, T1, Tve1, p1, eve1, rho_eve1);
+        apply_lt_stage(rk_stage_dt_scale[0] * dt_step, rhoY1, y1, imw1, T1, Tve1, p1, eve1, rho_eve1, src1);
+        check_finite_state("rk3-stage1-post-lt", step, time, rhoY1, y1, T1, Tve1, p1, eve1, rho_eve1);
+
+        evaluate_sources(T1, Tve1, rhoY1, y1, src1);
+        std::vector<real> rhoY2 = rhoY0;
+        for (int l = 0; l < ns; ++l) {
+          rhoY2[l] = 0.75 * rhoY0[l] + 0.25 * (rhoY1[l] + dt_step * src1.omega[l]);
+        }
+        real rho_eve2 = 0.75 * rho_eve0 + 0.25 * (rho_eve1 + dt_step * src1.chemical_eve_source);
+        std::vector<real> y2 = yk;
+        real imw2 = imw;
+        real T2 = T1, Tve2 = Tve1, p2 = p1, eve2 = eve1;
+        normalize_state(rhoY2, y2, imw2);
+        recover_temperatures(y2, imw2, T2, Tve2, p2, eve2, rho_eve2, T1, Tve1);
+        check_finite_state("rk3-stage2-post-recover", step, time, rhoY2, y2, T2, Tve2, p2, eve2, rho_eve2);
+        apply_lt_stage(rk_stage_dt_scale[1] * dt_step, rhoY2, y2, imw2, T2, Tve2, p2, eve2, rho_eve2, src2);
+        check_finite_state("rk3-stage2-post-lt", step, time, rhoY2, y2, T2, Tve2, p2, eve2, rho_eve2);
+
+        evaluate_sources(T2, Tve2, rhoY2, y2, src2);
+        for (int l = 0; l < ns; ++l) {
+          rhoY[l] = (rhoY0[l] + 2.0 * (rhoY2[l] + dt_step * src2.omega[l])) / 3.0;
+        }
+        rho_eve = (rho_eve0 + 2.0 * (rho_eve2 + dt_step * src2.chemical_eve_source)) / 3.0;
+        normalize_state(rhoY, yk, imw);
+        recover_temperatures(yk, imw, T, Tve, p, eve, rho_eve, T2, Tve2);
+        check_finite_state("rk3-final-post-recover", step, time, rhoY, yk, T, Tve, p, eve, rho_eve);
+        apply_lt_stage(rk_stage_dt_scale[2] * dt_step, rhoY, yk, imw, T, Tve, p, eve, rho_eve, current_src);
+        check_finite_state("rk3-final-post-lt", step, time, rhoY, yk, T, Tve, p, eve, rho_eve);
+      }
+
+      time += dt_step;
+      ++step;
+      evaluate_sources(T, Tve, rhoY, yk, current_src);
+
+      if (screen_frequency > 0 && step % screen_frequency == 0) {
+        printf("Step: %d, Time: %.6e s, T: %.6f K, Tve: %.6f K, P: %.6f Pa, Eve: %.6e, chemEve: %.6e, vtEve: %.6e\n",
+               step, time, T, Tve, p, eve, current_src.chemical_eve_source, current_src.vt_eve_source);
+      }
+      if ((file_frequency > 0 && step % file_frequency == 0) || end_time - time <= 1e-30) {
+        write_state(fp, time, T, Tve, p, eve, rho_eve, current_src, step, imw, yk);
+      }
+    }
+
+    fclose(fp);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    printf("Total simulation time is %.6es.\n", duration.count());
+    return;
   }
   // compute the total energy
   real E = 0;
@@ -533,8 +802,134 @@ void const_volume_reactor(Parameter &parameter) {
 }
 
 #ifdef Combustion2Part
+namespace {
+real smooth_reaction_temperature_host(real trx) {
+  constexpr real T_min = 800.0;
+  constexpr real epsilon = 80.0;
+  return 0.5 * (trx + T_min + std::sqrt((trx - T_min) * (trx - T_min) + epsilon * epsilon));
+}
+
+real reaction_temperature_host(real t, real tve, real a, real b, const cfd::Reaction &reaction) {
+  if (!reaction.two_temperature_reaction_temperature) return t;
+  const real t_safe = std::max<real>(t, 1.0);
+  const real tve_safe = std::max<real>(tve, 1.0);
+  return smooth_reaction_temperature_host(std::pow(t_safe, a) * std::pow(tve_safe, b));
+}
+
+real compute_vib_energy_host(int i_spec, real t, const cfd::Species &species) {
+  if (!species.has_two_temperature_data || i_spec < 0 || i_spec >= species.n_spec) return 0.0;
+  const real temp = std::max<real>(t, 1.0);
+  const real theta = species.theta_v[i_spec];
+  if (theta <= 0.0) return 0.0;
+  const real x = theta / temp;
+  if (x >= 200.0) return 0.0;
+  const real r_spec = cfd::R_u / species.mw[i_spec];
+  return r_spec * theta / std::expm1(x);
+}
+
+real compute_vib_cv_host(int i_spec, real t, const cfd::Species &species) {
+  if (!species.has_two_temperature_data || i_spec < 0 || i_spec >= species.n_spec) return 0.0;
+  const real temp = std::max<real>(t, 1.0);
+  const real theta = species.theta_v[i_spec];
+  if (theta <= 0.0) return 0.0;
+  const real x = theta / temp;
+  if (x >= 200.0) return 0.0;
+  const real ex = std::exp(x);
+  const real denom = ex - 1.0;
+  const real r_spec = cfd::R_u / species.mw[i_spec];
+  return r_spec * x * x * ex / (denom * denom);
+}
+
+real compute_mixture_vib_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
+                                     real *cv_v = nullptr) {
+  real ev = 0.0;
+  real cv = 0.0;
+  for (int i = 0; i < species.n_spec; ++i) {
+    const real yi = i < static_cast<int>(y.size()) ? y[i] : 0.0;
+    ev += yi * compute_vib_energy_host(i, t, species);
+    cv += yi * compute_vib_cv_host(i, t, species);
+  }
+  if (cv_v != nullptr) *cv_v = cv;
+  return ev;
+}
+
+real compute_ve_energy_host(int i_spec, real t, const cfd::Species &species) {
+  return species.compute_ve_energy(i_spec, t);
+}
+
+real compute_ve_cv_host(int i_spec, real t, const cfd::Species &species) {
+  return species.compute_ve_cv(i_spec, t);
+}
+
+real compute_mixture_ve_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
+                                    real *cv_ve = nullptr) {
+  return species.compute_mixture_ve_energy(t, y, cv_ve);
+}
+
+real mw_from_imw_host(real imw) {
+  return 1.0 / std::max(imw, static_cast<real>(1e-20));
+}
+
+real default_lt_a_host(real reduced_mass, real theta_v) {
+  return 1.16e-3 * std::sqrt(std::max(reduced_mass, static_cast<real>(1e-20))) *
+         std::pow(std::max(theta_v, static_cast<real>(0.0)), static_cast<real>(4.0 / 3.0));
+}
+
+real default_lt_b_host(real reduced_mass) {
+  return 0.015 * std::pow(std::max(reduced_mass, static_cast<real>(1e-20)), static_cast<real>(0.25));
+}
+
+real compute_pair_mw_relaxation_time_host(int i_vib, int i_partner, real t, real p, const cfd::Species &species) {
+  if (p <= 1e-16 || t <= 1.0) return 1e30;
+
+  const real mw_v = species.mw[i_vib];
+  const real mw_p = species.mw[i_partner];
+  const real reduced_mass = mw_v * mw_p / std::max(mw_v + mw_p, static_cast<real>(1e-20));
+
+  real a_ij = species.lt_a(i_vib, i_partner);
+  real b_ij = species.lt_b(i_vib, i_partner);
+  if (a_ij <= 0.0 || b_ij <= 0.0) {
+    a_ij = default_lt_a_host(reduced_mass, species.theta_v[i_vib]);
+    b_ij = default_lt_b_host(reduced_mass);
+  }
+
+  const real mw_exponent = a_ij * (std::pow(t, static_cast<real>(-1.0 / 3.0)) - b_ij) - 18.421;
+  return std::max(std::exp(mw_exponent) * cfd::p_atm / p, static_cast<real>(1e-30));
+}
+
+real compute_species_vt_relaxation_time_host(int i_vib, real density, real t, real p, const std::vector<real> &y,
+                                             const cfd::Species &species) {
+  real conc = 0.0;
+  real denom = 0.0;
+  for (int j = 0; j < species.n_spec; ++j) {
+    const real yj = std::max(y[j], static_cast<real>(0.0));
+    if (yj <= 0.0) continue;
+    const real mole_like = yj / species.mw[j];
+    const real tau_j = compute_pair_mw_relaxation_time_host(i_vib, j, t, p, species);
+    conc += mole_like;
+    denom += mole_like / tau_j;
+  }
+  if (conc <= 0.0 || denom <= 0.0) return 1e30;
+
+  const real tau_mw = conc / denom;
+  const real sigma = std::max(species.park_sigma[i_vib], static_cast<real>(1e-30)) *
+                     (static_cast<real>(2.5e9) / std::max(t * t, static_cast<real>(1.0)));
+  const real n_total = density * conc * cfd::avogadro;
+  const real c_s = std::sqrt(std::max(static_cast<real>(8.0) * cfd::R_u * t / (cfd::pi * species.mw[i_vib]),
+                                      static_cast<real>(1e-30)));
+  const real tau_park = 1.0 / std::max(sigma * c_s * n_total, static_cast<real>(1e-30));
+  return std::max(tau_mw + tau_park, static_cast<real>(1e-30));
+}
+}
+
 void compute_src(int mechanism, real t, const Species &species, const Reaction &reaction, const std::vector<real> &rhoY,
   std::vector<real> &q1, std::vector<real> &q2, std::vector<real> &omega_d, std::vector<real> &omega) {
+  compute_src(mechanism, t, t, species, reaction, rhoY, q1, q2, omega_d, omega);
+}
+
+void compute_src(int mechanism, real t, real tve, const Species &species, const Reaction &reaction,
+  const std::vector<real> &rhoY, std::vector<real> &q1, std::vector<real> &q2, std::vector<real> &omega_d,
+  std::vector<real> &omega) {
   const int ns = species.n_spec;
   std::vector<real> c(ns, 0);
   for (int l = 0; l < ns; ++l) {
@@ -547,12 +942,67 @@ void compute_src(int mechanism, real t, const Species &species, const Reaction &
     chemical_source_hardCoded1(t, species, c, q1, q2, omega_d, omega);
   } else {
     // Any mechanism provided by the user
-    auto kf = forward_reaction_rate(t, species, reaction, c);
-    auto kb = backward_reaction_rate(t, species, reaction, kf, c);
+    auto kf = forward_reaction_rate(t, tve, species, reaction, c);
+    auto kb = backward_reaction_rate(t, tve, species, reaction, kf, c);
     std::vector<real> q(nr, 0);
     rate_of_progress(kf, kb, c, q, q1, q2, species, reaction);
     chemical_source(q1, q2, omega_d, omega, species, reaction);
   }
+}
+
+real compute_vt_relaxation_source(real density, real t, real tve, const std::vector<real> &y, const Species &species,
+  real *eve_eq, real *tau_eff) {
+  if (!species.has_two_temperature_data || density <= 0.0) {
+    if (eve_eq != nullptr) *eve_eq = 0.0;
+    if (tau_eff != nullptr) *tau_eff = 1e30;
+    return 0.0;
+  }
+
+  real r_mix = 0.0;
+  for (int i = 0; i < species.n_spec; ++i) {
+    r_mix += std::max(y[i], static_cast<real>(0.0)) * cfd::R_u / species.mw[i];
+  }
+  const real p = density * r_mix * std::max(t, static_cast<real>(1.0));
+
+  real eve_eq_mix = 0.0;
+  real eve_mix = 0.0;
+  real src = 0.0;
+  for (int i = 0; i < species.n_spec; ++i) {
+    if (species.theta_v[i] <= 0.0) continue;
+    const real yi = std::max(y[i], static_cast<real>(0.0));
+    if (yi <= 0.0) continue;
+
+    const real e_eq_i = compute_vib_energy_host(i, t, species);
+    const real e_i = compute_vib_energy_host(i, tve, species);
+    const real diff_i = e_eq_i - e_i;
+    eve_eq_mix += yi * e_eq_i;
+    eve_mix += yi * e_i;
+    if (std::abs(diff_i) <= 1e-16) continue;
+
+    const real tau_i = compute_species_vt_relaxation_time_host(i, density, t, p, y, species);
+    if (tau_i < 1e29) {
+      src += density * yi * diff_i / tau_i;
+    }
+  }
+
+  if (eve_eq != nullptr) *eve_eq = eve_eq_mix;
+  if (tau_eff != nullptr) {
+    const real diff_mix = eve_eq_mix - eve_mix;
+    if (std::abs(diff_mix) > 1e-16 && std::abs(src) > 1e-16) {
+      *tau_eff = std::max(density * diff_mix / src, static_cast<real>(1e-30));
+    } else {
+      *tau_eff = 1e30;
+    }
+  }
+  return src;
+}
+
+real compute_two_temperature_chemical_source(real tve, const Species &species, const std::vector<real> &omega) {
+  real source = 0.0;
+  for (int l = 0; l < species.n_spec; ++l) {
+    source += omega[l] * species.compute_ve_energy(l, tve);
+  }
+  return source;
 }
 
 real log10_real(real x) {
@@ -949,20 +1399,56 @@ void chemical_source_hardCoded1(real t, const Species &species, const std::vecto
 }
 
 void compute_gibbs_div_rt(real t, const Species &species, std::vector<real> &gibbs_rt) {
-  const real t2{t * t}, t3{t2 * t}, t4{t3 * t}, t_inv{1 / t}, log_t{std::log(t)};
   const int ns = species.n_spec;
+  if (species.nasa_7_or_9 == 7) {
+    const real t2{t * t}, t3{t2 * t}, t4{t3 * t}, t_inv{1 / t}, log_t{std::log(t)};
+    for (int i = 0; i < ns; ++i) {
+      if (t < species.t_low[i]) {
+        const real tt = species.t_low[i];
+        const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt_inv = 1 / tt, log_tt = std::log(tt);
+        const auto &coeff = species.low_temp_coeff;
+        gibbs_rt[i] = coeff(i, 0) * (1.0 - log_tt) - 0.5 * coeff(i, 1) * tt - coeff(i, 2) * tt2 / 6.0 -
+                      coeff(i, 3) * tt3 / 12.0 - coeff(i, 4) * tt4 * 0.05 + coeff(i, 5) * tt_inv - coeff(i, 6);
+      } else {
+        const auto &coeff = t < species.t_mid[i] ? species.low_temp_coeff : species.high_temp_coeff;
+        gibbs_rt[i] =
+            coeff(i, 0) * (1.0 - log_t) - 0.5 * coeff(i, 1) * t - coeff(i, 2) * t2 / 6.0 - coeff(i, 3) * t3 / 12.0 -
+            coeff(i, 4) * t4 * 0.05 + coeff(i, 5) * t_inv - coeff(i, 6);
+      }
+    }
+    return;
+  }
+
+  const real t2{t * t}, t3{t2 * t}, t4{t3 * t}, it{1.0 / t}, lnt{std::log(t)}, it2{it * it};
+  const auto &coeff = species.therm_poly_coeff;
   for (int i = 0; i < ns; ++i) {
-    if (t < species.t_low[i]) {
-      const real tt = species.t_low[i];
-      const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, tt_inv = 1 / tt, log_tt = std::log(tt);
-      const auto &coeff = species.low_temp_coeff;
-      gibbs_rt[i] = coeff(i, 0) * (1.0 - log_tt) - 0.5 * coeff(i, 1) * tt - coeff(i, 2) * tt2 / 6.0 -
-                    coeff(i, 3) * tt3 / 12.0 - coeff(i, 4) * tt4 * 0.05 + coeff(i, 5) * tt_inv - coeff(i, 6);
+    if (t < species.temperature_range(i, 0)) {
+      const real tt = species.temperature_range(i, 0);
+      const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt;
+      const real itt = 1.0 / tt, itt2 = itt * itt, lntt = std::log(tt);
+      gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt + 1) +
+                    coeff(2, 0, i) * (1.0 - lntt) - 0.5 * coeff(3, 0, i) * tt - coeff(4, 0, i) * tt2 / 6.0 -
+                    coeff(5, 0, i) * tt3 / 12.0 - coeff(6, 0, i) * tt4 * 0.05 + coeff(7, 0, i) * itt -
+                    coeff(8, 0, i);
+    } else if (t > species.temperature_range(i, species.n_temperature_range[i])) {
+      const real tt = species.temperature_range(i, species.n_temperature_range[i]);
+      const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt;
+      const real itt = 1.0 / tt, itt2 = itt * itt, lntt = std::log(tt);
+      const int j = species.n_temperature_range[i] - 1;
+      gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt + 1) +
+                    coeff(2, j, i) * (1.0 - lntt) - 0.5 * coeff(3, j, i) * tt - coeff(4, j, i) * tt2 / 6.0 -
+                    coeff(5, j, i) * tt3 / 12.0 - coeff(6, j, i) * tt4 * 0.05 + coeff(7, j, i) * itt -
+                    coeff(8, j, i);
     } else {
-      const auto &coeff = t < species.t_mid[i] ? species.low_temp_coeff : species.high_temp_coeff;
-      gibbs_rt[i] =
-          coeff(i, 0) * (1.0 - log_t) - 0.5 * coeff(i, 1) * t - coeff(i, 2) * t2 / 6.0 - coeff(i, 3) * t3 / 12.0 -
-          coeff(i, 4) * t4 * 0.05 + coeff(i, 5) * t_inv - coeff(i, 6);
+      for (int j = 0; j < species.n_temperature_range[i]; ++j) {
+        if (species.temperature_range(i, j) <= t && t <= species.temperature_range(i, j + 1)) {
+          gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt + 1) +
+                        coeff(2, j, i) * (1.0 - lnt) - 0.5 * coeff(3, j, i) * t - coeff(4, j, i) * t2 / 6.0 -
+                        coeff(5, j, i) * t3 / 12.0 - coeff(6, j, i) * t4 * 0.05 + coeff(7, j, i) * it -
+                        coeff(8, j, i);
+          break;
+        }
+      }
     }
   }
 }
@@ -994,6 +1480,76 @@ real update_t(real T0, real imw, const Species &species, const std::vector<real>
   return t;
 }
 
+real update_t_two_temperature(real T0, const Species &species, const std::vector<real> &yk, real E, real eve) {
+  const int ns = species.n_spec;
+  constexpr int max_iter = 80;
+  constexpr real eps = 1e-8;
+
+  auto evaluate_state = [&](real t_eval, real &residual, real &cv_tr) {
+    std::vector<real> hk(ns, 0), cpk(ns, 0);
+    species.compute_enthalpy_and_cp(t_eval, hk.data(), cpk.data());
+    real e_mix = 0.0;
+    real cv_mix = 0.0;
+    for (int l = 0; l < ns; ++l) {
+      const real r_spec = R_u / species.mw[l];
+      e_mix += yk[l] * (hk[l] - r_spec * t_eval);
+      cv_mix += yk[l] * (cpk[l] - r_spec);
+    }
+    real cv_v_eq = 0.0;
+    const real e_ve_eq = compute_mixture_ve_energy_host(t_eval, yk, species, &cv_v_eq);
+    residual = e_mix - e_ve_eq + eve - E;
+    cv_tr = cv_mix - cv_v_eq;
+    if (!std::isfinite(e_mix) || !std::isfinite(cv_mix) || !std::isfinite(e_ve_eq) || !std::isfinite(cv_v_eq) ||
+        !std::isfinite(residual) || !std::isfinite(cv_tr) || cv_tr <= 0.0) {
+      fprintf(stderr,
+              "[2T-CVR] update_t_two_temperature evaluation failure: T=%.13e E=%.13e Eve=%.13e "
+              "e_mix=%.13e e_ve_eq=%.13e cv_mix=%.13e cv_ve_eq=%.13e residual=%.13e cv_tr=%.13e\n",
+              t_eval, E, eve, e_mix, e_ve_eq, cv_mix, cv_v_eq, residual, cv_tr);
+      for (int l = 0; l < ns; ++l) {
+        fprintf(stderr, "  y[%d]=%.13e hk=%.13e cp=%.13e\n", l, yk[l], hk[l], cpk[l]);
+      }
+      fflush(stderr);
+      return false;
+    }
+    return true;
+  };
+
+  real t = std::max<real>(T0, 1.0);
+  real residual = 0.0, cv_tr = 0.0;
+  if (!evaluate_state(t, residual, cv_tr)) return std::max<real>(T0, 1.0);
+
+  for (int iter = 0; iter < max_iter; ++iter) {
+    const real scale = std::max<real>(1.0, std::abs(E) + std::abs(eve));
+    if (std::abs(residual) < eps * scale) break;
+
+    real dt_newton = -residual / cv_tr;
+    const real limited_step = std::clamp(dt_newton, -0.2 * t, 0.2 * t);
+    real candidate = std::max<real>(1.0, t + limited_step);
+    real residual_candidate = 0.0, cv_tr_candidate = 0.0;
+    bool accepted = false;
+
+    for (int backtrack = 0; backtrack < 20; ++backtrack) {
+      if (evaluate_state(candidate, residual_candidate, cv_tr_candidate) &&
+          std::abs(residual_candidate) < std::abs(residual)) {
+        accepted = true;
+        break;
+      }
+      candidate = std::max<real>(1.0, 0.5 * (candidate + t));
+    }
+
+    if (!accepted) {
+      break;
+    }
+
+    const real err = std::abs(candidate - t) / std::max<real>(1.0, t);
+    t = candidate;
+    residual = residual_candidate;
+    cv_tr = cv_tr_candidate;
+    if (err < eps) break;
+  }
+  return t;
+}
+
 real update_t_with_h(real T0, real imw, const Species &species, const std::vector<real> &yk, real h) {
   real t = T0;
   const int ns = species.n_spec;
@@ -1020,6 +1576,11 @@ real update_t_with_h(real T0, real imw, const Species &species, const std::vecto
 
 std::vector<real> forward_reaction_rate(real t, const Species &species, const Reaction &reaction,
   const std::vector<real> &c) {
+  return forward_reaction_rate(t, t, species, reaction, c);
+}
+
+std::vector<real> forward_reaction_rate(real t, real tve, const Species &species, const Reaction &reaction,
+  const std::vector<real> &c) {
   const int ns = species.n_spec, nr = reaction.n_reac;
   std::vector<real> kf(nr, 0);
   const auto &A = reaction.A, &b = reaction.b, &Ea = reaction.Ea;
@@ -1027,11 +1588,13 @@ std::vector<real> forward_reaction_rate(real t, const Species &species, const Re
   const auto &A2 = reaction.A2, &b2 = reaction.b2, &Ea2 = reaction.Ea2;
   const auto &third_body_coeff = reaction.third_body_coeff;
   const auto &alpha = reaction.troe_alpha, &t3 = reaction.troe_t3, &t1 = reaction.troe_t1, &t2 = reaction.troe_t2;
+  const auto &tcf_a = reaction.tcf_a, &tcf_b = reaction.tcf_b;
   for (int i = 0; i < nr; ++i) {
-    kf[i] = arrhenius(t, A[i], b[i], Ea[i]);
+    const real thf = reaction_temperature_host(t, tve, tcf_a[i], tcf_b[i], reaction);
+    kf[i] = arrhenius(thf, A[i], b[i], Ea[i]);
     if (type[i] == 3) {
       // Duplicate reaction
-      kf[i] += arrhenius(t, A2[i], b2[i], Ea2[i]);
+      kf[i] += arrhenius(thf, A2[i], b2[i], Ea2[i]);
     } else if (type[i] > 3) {
       real cc{0};
       for (int l = 0; l < ns; ++l) {
@@ -1041,7 +1604,7 @@ std::vector<real> forward_reaction_rate(real t, const Species &species, const Re
         // Third body reaction
         kf[i] *= cc;
       } else {
-        const real kf_low = arrhenius(t, A2[i], b2[i], Ea2[i]);
+        const real kf_low = arrhenius(thf, A2[i], b2[i], Ea2[i]);
         const real kf_high = kf[i];
         if (kf_high < 1e-25 && kf_low < 1e-25) {
           // If both kf_high and kf_low are too small, set kf to zero
@@ -1052,9 +1615,9 @@ std::vector<real> forward_reaction_rate(real t, const Species &species, const Re
         real F = 1.0;
         if (type[i] > 5) {
           // Troe form
-          real f_cent = (1 - alpha[i]) * std::exp(-t / t3[i]) + alpha[i] * std::exp(-t / t1[i]);
+          real f_cent = (1 - alpha[i]) * std::exp(-thf / t3[i]) + alpha[i] * std::exp(-thf / t1[i]);
           if (type[i] == 7) {
-            f_cent += std::exp(-t2[i] / t);
+            f_cent += std::exp(-t2[i] / thf);
           }
           const real logFc = std::log10(f_cent);
           const real cn = -0.4 - 0.67 * logFc;
@@ -1073,9 +1636,15 @@ std::vector<real> forward_reaction_rate(real t, const Species &species, const Re
 
 std::vector<real> backward_reaction_rate(real t, const Species &species, const Reaction &reaction,
   const std::vector<real> &kf, const std::vector<real> &c) {
+  return backward_reaction_rate(t, t, species, reaction, kf, c);
+}
+
+std::vector<real> backward_reaction_rate(real t, real tve, const Species &species, const Reaction &reaction,
+  const std::vector<real> &kf, const std::vector<real> &c) {
   int n_gibbs{reaction.n_reac};
   const int nr = reaction.n_reac;
   const auto &type = reaction.label;
+  const auto &tcb_a = reaction.tcb_a, &tcb_b = reaction.tcb_b;
   std::vector<real> kb(nr, 0);
   for (int i = 0; i < nr; ++i) {
     if (type[i] == 0) {
@@ -1084,7 +1653,8 @@ std::vector<real> backward_reaction_rate(real t, const Species &species, const R
       --n_gibbs;
     } else if (reaction.rev_type[i] == 1) {
       // REV reaction
-      kb[i] = arrhenius(t, reaction.A2[i], reaction.b2[i], reaction.Ea2[i]);
+      const real thb = reaction_temperature_host(t, tve, tcb_a[i], tcb_b[i], reaction);
+      kb[i] = arrhenius(thb, reaction.A2[i], reaction.b2[i], reaction.Ea2[i]);
       if (type[i] == 4) {
         // Third body required
         real cc{0};
@@ -1099,14 +1669,15 @@ std::vector<real> backward_reaction_rate(real t, const Species &species, const R
   if (n_gibbs < 1)
     return std::move(kb);
 
-  std::vector<real> gibbs_rt(species.n_spec, 0);
-  compute_gibbs_div_rt(t, species, gibbs_rt);
-  constexpr real temp_p = p_atm / R_u * 1e-3; // Convert the unit to mol*K/cm3
-  const real temp_t = temp_p / t;             // Unit is mol/cm3
   const auto &stoi_f = reaction.stoi_f, &stoi_b = reaction.stoi_b;
   const auto order = reaction.order;
   for (int i = 0; i < nr; ++i) {
     if (type[i] != 2 && type[i] != 0) {
+      const real thb = reaction_temperature_host(t, tve, tcb_a[i], tcb_b[i], reaction);
+      std::vector<real> gibbs_rt(species.n_spec, 0);
+      compute_gibbs_div_rt(thb, species, gibbs_rt);
+      constexpr real temp_p = p_atm / R_u * 1e-3; // Convert the unit to mol*K/cm3
+      const real temp_t = temp_p / thb;           // Unit is mol/cm3
       real d_gibbs{0};
       for (int l = 0; l < species.n_spec; ++l) {
         d_gibbs += gibbs_rt[l] * (stoi_b(i, l) - stoi_f(i, l));
