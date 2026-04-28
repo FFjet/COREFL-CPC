@@ -25,10 +25,18 @@ __device__ void compute_temperature_and_pressure(int i, int j, int k, const DPar
     if (param->i_eve >= 0) {
       real y[MAX_SPEC_NUMBER];
       gather_species_mass_fractions(Y, i, j, k, param, y);
-      const real eve = max(zone->sv(i, j, k, param->i_eve), static_cast<real>(0.0));
+      real eve = max(zone->sv(i, j, k, param->i_eve), static_cast<real>(0.0));
       real tve = zone->temperature_ve(i, j, k);
       if (tve <= 0) tve = max(bv(i, j, k, 5), static_cast<real>(1.0));
       tve = invert_tve_from_eve(eve, y, tve, param);
+      const real max_reasonable_tve = max(static_cast<real>(1.0e7), static_cast<real>(1000.0) *
+                                                                  max(bv(i, j, k, 5), static_cast<real>(1.0)));
+      if (!isfinite(eve) || !isfinite(tve) || tve <= 0.0 || tve > max_reasonable_tve) {
+        tve = max(bv(i, j, k, 5), static_cast<real>(1.0));
+        eve = compute_mixture_ve_energy(tve, y, param);
+        zone->sv(i, j, k, param->i_eve) = eve;
+        zone->cv(i, j, k, 5 + param->i_eve) = density * eve;
+      }
       zone->temperature_ve(i, j, k) = tve;
 
       real err{1}, t{max(bv(i, j, k, 5), static_cast<real>(1.0))};

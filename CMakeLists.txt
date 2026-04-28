@@ -12,10 +12,17 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 60)
 endif()
 
+option(COREFL_ENABLE_TWO_TEMPERATURE "Enable two-temperature thermochemistry" OFF)
+
 add_compile_definitions(MAX_SPEC_NUMBER=9)
 add_compile_definitions(MAX_REAC_NUMBER=19)
 add_compile_definitions(MAX_PASSIVE_SCALAR_NUMBER=1)
 add_compile_definitions(Combustion2Part)
+if(COREFL_ENABLE_TWO_TEMPERATURE)
+  add_compile_definitions(COREFL_ENABLE_TWO_TEMPERATURE=1)
+else()
+  add_compile_definitions(COREFL_ENABLE_TWO_TEMPERATURE=0)
+endif()
 
 project(COREFL-CPC CUDA CXX)
 

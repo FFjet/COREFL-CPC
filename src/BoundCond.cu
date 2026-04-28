@@ -2172,6 +2172,7 @@ template<MixtureModel mix_model> __global__ void apply_symmetry(DZone *zone, int
       zone->temperature_ve(i, j, k) = zone->temperature_ve(inner_idx[0], inner_idx[1], inner_idx[2]);
     }
   }
+  compute_cv_from_bv_1_point<mix_model>(zone, param, i, j, k);
 
   // For ghost grids
   for (int g = 1; g <= zone->ngg; ++g) {
@@ -3197,10 +3198,13 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
   }
 
   const real rho_wall = p / (t_wall * R);
+  real wall_u{0};
+  real wall_v{0};
+  real wall_w{0};
   bv(i, j, k, 0) = rho_wall;
-  bv(i, j, k, 1) = 0;
-  bv(i, j, k, 2) = 0;
-  bv(i, j, k, 3) = 0;
+  bv(i, j, k, 1) = wall_u;
+  bv(i, j, k, 2) = wall_v;
+  bv(i, j, k, 3) = wall_w;
   bv(i, j, k, 4) = p;
   bv(i, j, k, 5) = t_wall;
 
@@ -3251,7 +3255,6 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
     bv(i, j, k, 3) = bdJin(2, 3) * vt + bdJin(3, 3) * vs - bdJin(1, 3) * vn;
   }
 
-  real v_blow{0};
   int if_fluctuation = wall->fluctuation_type;
   if (if_fluctuation == 1) {
     // Pirozzoli & Li fluctuations
@@ -3276,8 +3279,8 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
       ht += wall->Tm[m] * sin(wall->fluctuation_frequency * t + 2.0 * pi * phim[m]);
     }
     if (x > x0 && x < x1) {
-      v_blow = A0 * param->v_ref * fx * gz * ht;
-      bv(i, j, k, 2) = A0 * param->v_ref * fx * gz * ht;
+      wall_v = A0 * param->v_ref * fx * gz * ht;
+      bv(i, j, k, 2) = wall_v;
     }
   } else if (if_fluctuation == 3) {
     real A0 = wall->fluctuation_intensity;
@@ -3293,13 +3296,15 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
     if (real x = zone->x(i, j, k); x >= x0 && x <= x_middle) {
       xi = (x - x0) / (x_middle - x0);
       const real xi3 = xi * xi * xi;
-      bv(i, j, k, 2) = A0 * (15.1875 * xi3 * xi * xi - 35.4375 * xi3 * xi + 20.25 * xi3) * cos(beta * z) *
-                       sin(omega * t) / param->v_ref;
+      wall_v = A0 * (15.1875 * xi3 * xi * xi - 35.4375 * xi3 * xi + 20.25 * xi3) * cos(beta * z) *
+               sin(omega * t) / param->v_ref;
+      bv(i, j, k, 2) = wall_v;
     } else if (x >= x_middle && x <= x1) {
       xi = (x1 - x) / (x1 - x_middle);
       const real xi3 = xi * xi * xi;
-      bv(i, j, k, 2) = -A0 * (15.1875 * xi3 * xi * xi - 35.4375 * xi3 * xi + 20.25 * xi3) * cos(beta * z) *
-                       sin(omega * t) / param->v_ref;
+      wall_v = -A0 * (15.1875 * xi3 * xi * xi - 35.4375 * xi3 * xi + 20.25 * xi3) * cos(beta * z) *
+               sin(omega * t) / param->v_ref;
+      bv(i, j, k, 2) = wall_v;
     }
   }
 
@@ -3371,9 +3376,9 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
 
     const real rho_g{p_i / (t_g * R)};
     bv(i_gh[0], i_gh[1], i_gh[2], 0) = rho_g;
-    bv(i_gh[0], i_gh[1], i_gh[2], 1) = -bv(i_in[0], i_in[1], i_in[2], 1);
-    bv(i_gh[0], i_gh[1], i_gh[2], 2) = v_blow * 2 - bv(i_in[0], i_in[1], i_in[2], 2);
-    bv(i_gh[0], i_gh[1], i_gh[2], 3) = -bv(i_in[0], i_in[1], i_in[2], 3);
+    bv(i_gh[0], i_gh[1], i_gh[2], 1) = 2 * wall_u - bv(i_in[0], i_in[1], i_in[2], 1);
+    bv(i_gh[0], i_gh[1], i_gh[2], 2) = 2 * wall_v - bv(i_in[0], i_in[1], i_in[2], 2);
+    bv(i_gh[0], i_gh[1], i_gh[2], 3) = 2 * wall_w - bv(i_in[0], i_in[1], i_in[2], 3);
     bv(i_gh[0], i_gh[1], i_gh[2], 4) = p_i;
     bv(i_gh[0], i_gh[1], i_gh[2], 5) = t_g;
 

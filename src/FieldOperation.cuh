@@ -36,14 +36,22 @@ __device__ __forceinline__ void sync_two_temperature_state_from_sv(DZone *zone, 
 
     const real t = max(zone->bv(i, j, k, 5), static_cast<real>(1.0));
     real tve = zone->temperature_ve(i, j, k);
-    if (!isfinite(tve) || tve <= 0.0) {
+    const real max_reasonable_guess = max(static_cast<real>(1.0e7), static_cast<real>(1000.0) * t);
+    if (!isfinite(tve) || tve <= 0.0 || tve > max_reasonable_guess) {
       tve = t;
     }
 
-    if (!isfinite(sv(i, j, k, param->i_eve)) || sv(i, j, k, param->i_eve) <= 0.0) {
-      sv(i, j, k, param->i_eve) = compute_mixture_ve_energy(tve, y, param);
+    auto &eve = sv(i, j, k, param->i_eve);
+    if (!isfinite(eve) || eve <= 0.0) {
+      eve = compute_mixture_ve_energy(tve, y, param);
     } else {
-      tve = invert_tve_from_eve(sv(i, j, k, param->i_eve), y, tve, param);
+      const real tve_from_eve = invert_tve_from_eve(eve, y, tve, param);
+      if (isfinite(tve_from_eve) && tve_from_eve > 0.0 && tve_from_eve <= max_reasonable_guess) {
+        tve = tve_from_eve;
+      } else {
+        tve = t;
+        eve = compute_mixture_ve_energy(tve, y, param);
+      }
     }
     zone->temperature_ve(i, j, k) = tve;
   }

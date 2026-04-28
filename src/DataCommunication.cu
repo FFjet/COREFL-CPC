@@ -71,6 +71,12 @@ template<MixtureModel mix_model> __global__ void inner_communication(DZone *zone
         for (int l = 0; l < param->n_scalar; ++l) {
           zone->sv(idx[0], idx[1], idx[2], l) = tar_zone->sv(idx_tar[0], idx_tar[1], idx_tar[2], l);
         }
+        if constexpr (kTwoTemperature) {
+          if (param->i_eve >= 0) {
+            zone->temperature_ve(idx[0], idx[1], idx[2]) =
+                tar_zone->temperature_ve(idx_tar[0], idx_tar[1], idx_tar[2]);
+          }
+        }
       } else {
         #pragma unroll
         for (int l = 0; l < 6; ++l) {
@@ -87,6 +93,15 @@ template<MixtureModel mix_model> __global__ void inner_communication(DZone *zone
           zone->sv(idx[0], idx[1], idx[2], l) = ave;
           tar_zone->sv(idx_tar[0], idx_tar[1], idx_tar[2], l) = ave;
         }
+        if constexpr (kTwoTemperature) {
+          if (param->i_eve >= 0) {
+            const real tve_ave = 0.5 * (tar_zone->temperature_ve(idx_tar[0], idx_tar[1], idx_tar[2]) +
+                                        zone->temperature_ve(idx[0], idx[1], idx[2]));
+            zone->temperature_ve(idx[0], idx[1], idx[2]) = tve_ave;
+            tar_zone->temperature_ve(idx_tar[0], idx_tar[1], idx_tar[2]) = tve_ave;
+          }
+        }
+        compute_cv_from_bv_1_point<mix_model>(tar_zone, param, idx_tar[0], idx_tar[1], idx_tar[2]);
       }
     }
   } else {
@@ -97,6 +112,12 @@ template<MixtureModel mix_model> __global__ void inner_communication(DZone *zone
     }
     for (int l = 0; l < param->n_scalar; ++l) {
       zone->sv(idx[0], idx[1], idx[2], l) = tar_zone->sv(idx_tar[0], idx_tar[1], idx_tar[2], l);
+    }
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        zone->temperature_ve(idx[0], idx[1], idx[2]) =
+            tar_zone->temperature_ve(idx_tar[0], idx_tar[1], idx_tar[2]);
+      }
     }
   }
   compute_cv_from_bv_1_point<mix_model>(zone, param, idx[0], idx[1], idx[2]);

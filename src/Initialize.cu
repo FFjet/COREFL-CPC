@@ -9,10 +9,43 @@
 namespace cfd {
 namespace {
 constexpr int kRestartTemperatureVeLabel = 20057;
+constexpr int kTemperatureVeOutputLabel = 57;
+
+inline int find_temperature_ve_output_index(const Parameter &parameter) {
+  if constexpr (!kTwoTemperature) {
+    return -1;
+  } else {
+    const auto &ov_labels = parameter.get_int_array("ov_labels");
+    for (int l = 0; l < static_cast<int>(ov_labels.size()); ++l) {
+      if (ov_labels[l] == kTemperatureVeOutputLabel) {
+        return l;
+      }
+    }
+    return -1;
+  }
+}
+
+inline void copy_two_temperature_restart_auxiliary_to_device(
+  const Parameter &parameter, std::vector<Field> &field, bool temperature_ve_read) {
+  if constexpr (kTwoTemperature) {
+    if (parameter.get_int("i_eve") < 0) return;
+    const int i_tve = find_temperature_ve_output_index(parameter);
+    if (i_tve < 0) return;
+
+    for (auto &f: field) {
+      const auto n_bytes = f.h_ptr->temperature_ve.size() * sizeof(real);
+      if (temperature_ve_read) {
+        cudaMemcpy(f.h_ptr->temperature_ve.data(), f.ov[i_tve], n_bytes, cudaMemcpyHostToDevice);
+      } else {
+        cudaMemset(f.h_ptr->temperature_ve.data(), 0, n_bytes);
+      }
+    }
+  }
+}
 
 inline bool read_two_temperature_restart_scalar(Parameter &parameter, std::vector<Field> &field, int blk, int index,
                                                 MPI_File &fp, MPI_Offset &offset, MPI_Datatype ty, MPI_Status &status,
-                                                MPI_Offset memsz) {
+                                                MPI_Offset memsz, bool &temperature_ve_read) {
   if constexpr (!kTwoTemperature) {
     return false;
   } else {
@@ -24,6 +57,12 @@ inline bool read_two_temperature_restart_scalar(Parameter &parameter, std::vecto
       return true;
     }
     if (index == kRestartTemperatureVeLabel) {
+      const int i_tve = find_temperature_ve_output_index(parameter);
+      if (i_tve >= 0) {
+        auto tve = field[blk].ov[i_tve];
+        MPI_File_read_at(fp, offset, tve, 1, ty, &status);
+        temperature_ve_read = true;
+      }
       offset += memsz;
       return true;
     }
@@ -252,6 +291,7 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
     }
     // Read data of the current process
     int n_ps = parameter.get_int("n_ps");
+    bool temperature_ve_read{false};
     for (size_t blk = 0; blk < mesh.n_block; ++blk) {
       // 1. Zone marker. Value = 299.0, indicates a V112 header.
       offset += 4;
@@ -301,7 +341,8 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
           auto sv = field[blk].sv[index];
           MPI_File_read_at(fp, offset, sv, 1, ty, &status);
           offset += memsz;
-        } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
+        } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz,
+                                                       temperature_ve_read)) {
         } else if ((parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) &&
                    index < 6 + n_spec + n_turb) {
           // RANS/DDES
@@ -356,6 +397,7 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
       cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                  cudaMemcpyHostToDevice);
     }
+    copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
 
     std::ifstream step_file{"output/message/step.txt"};
     int step{0};
@@ -511,6 +553,7 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
     ++i_blk;
   }
   // Read data of the current process
+  bool temperature_ve_read{false};
   for (size_t blk = 0; blk < mesh.n_block; ++blk) {
     // 1. Zone marker. Value = 299.0, indicates a V112 header.
     offset += 4;
@@ -553,7 +596,8 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
         auto sv = field[blk].sv[index];
         MPI_File_read_at(fp, offset, sv, 1, ty, &status);
         offset += memsz;
-      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
+      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz,
+                                                     temperature_ve_read)) {
       } else if (index < 6 + n_spec + n_turb) {
         // If laminar, n_turb=0
         // turbulent variables
@@ -602,6 +646,7 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
     cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                cudaMemcpyHostToDevice);
   }
+  copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
 
   std::ifstream step_file{"output/message/step.txt"};
   int step{0};
@@ -631,6 +676,7 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
   int n_turb = parameter.get_int("n_turb");
   int n_ps = parameter.get_int("n_ps");
   MPI_Status status;
+  bool temperature_ve_read{false};
   for (int blk = 0; blk < mesh.n_block; ++blk) {
     // Get the offset of the corresponding block
     MPI_Offset offset = offset_data;
@@ -682,7 +728,8 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
         auto sv = field[blk].sv[index];
         MPI_File_read_at(fp, offset, sv, 1, ty, &status);
         offset += memsz;
-      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz)) {
+      } else if (read_two_temperature_restart_scalar(parameter, field, blk, index, fp, offset, ty, status, memsz,
+                                                     temperature_ve_read)) {
       } else if ((parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) &&
                  index < 6 + n_spec + n_turb) {
         // RANS/DDES
@@ -736,6 +783,7 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
     cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                cudaMemcpyHostToDevice);
   }
+  copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
 
   std::ifstream step_file{"output/message/step.txt"};
   int step{0};

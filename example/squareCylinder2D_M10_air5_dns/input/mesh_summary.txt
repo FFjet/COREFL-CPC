@@ -1,0 +1,85 @@
+Blocks: 24
+Total structured cells: 246544
+Total grid nodes counted per block: 251484
+X_CELLS: [88, 72, 132, 72, 220]
+Y_CELLS: [88, 72, 132, 72, 88]
+Wall cell width: 1.162574972500e-05 m
+First-center y+: 0.900
+Wall-normal spacing count: 532
+Wall-normal spacing min: 1.162574972500e-05 m
+Wall-normal spacing max: 1.162574972500e-05 m
+Wall-normal spacing max/min: 1.000000000000e+00
+Max block-interface normal-width ratio: 1.000000000000e+00
+Max block-interface node mismatch: 0.000000000000e+00 m
+Max block-interface tangent-width mismatch: 0.000000000000e+00 m
+rho_inf: 1.161430041884e-02
+a_inf: 3.472206893029e+02
+u_inf: 3.472206893029e+03
+mu_inf: 1.845916251198e-05
+re_body: 4.369348170140e+03
+cf_lam: 1.004522694727e-02
+u_tau: 2.460766883903e+02
+y_center: 5.812874862501e-06
+dy_wall: 1.162574972500e-05
+
+X segment joins:
+  join 0-1: 1.642390160614e-05 -> 1.642390160614e-05, ratio=1.000000000000e+00
+  join 1-2: 1.162574972500e-05 -> 1.162574972500e-05, ratio=1.000000000000e+00
+  join 2-3: 1.162574972500e-05 -> 1.162574972500e-05, ratio=1.000000000000e+00
+  join 3-4: 1.642390160614e-05 -> 1.642390160614e-05, ratio=1.000000000000e+00
+Y segment joins:
+  join 0-1: 1.642390160614e-05 -> 1.642390160614e-05, ratio=1.000000000000e+00
+  join 1-2: 1.162574972500e-05 -> 1.162574972500e-05, ratio=1.000000000000e+00
+  join 2-3: 1.162574972500e-05 -> 1.162574972500e-05, ratio=1.000000000000e+00
+  join 3-4: 1.642390160614e-05 -> 1.642390160614e-05, ratio=1.000000000000e+00
+
+X segment internal ratios:
+  seg 0: n=88, min=1.642390160614e-05, max=6.118930832677e-05, max_adjacent_ratio=1.015232490765e+00
+  seg 1: n=72, min=1.162574972500e-05, max=1.642390160614e-05, max_adjacent_ratio=1.004878272143e+00
+  seg 2: n=132, min=1.162574972500e-05, max=1.931514438433e-05, max_adjacent_ratio=1.007840841648e+00
+  seg 3: n=72, min=1.162574972500e-05, max=1.642390160614e-05, max_adjacent_ratio=1.004878272143e+00
+  seg 4: n=220, min=1.642390160614e-05, max=6.810684640135e-05, max_adjacent_ratio=1.006515839762e+00
+Y segment internal ratios:
+  seg 0: n=88, min=1.642390160614e-05, max=6.118930832677e-05, max_adjacent_ratio=1.015232490765e+00
+  seg 1: n=72, min=1.162574972500e-05, max=1.642390160614e-05, max_adjacent_ratio=1.004878272143e+00
+  seg 2: n=132, min=1.162574972500e-05, max=1.931514438433e-05, max_adjacent_ratio=1.007840841648e+00
+  seg 3: n=72, min=1.162574972500e-05, max=1.642390160614e-05, max_adjacent_ratio=1.004878272143e+00
+  seg 4: n=88, min=1.642390160614e-05, max=6.118930832677e-05, max_adjacent_ratio=1.015232490765e+00
+
+Block interface checks:
+  block 1 imax -> block 2: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 1 jmax -> block 6: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 2 imax -> block 3: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 2 jmax -> block 7: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 3 imax -> block 4: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 3 jmax -> block 8: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 4 imax -> block 5: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 4 jmax -> block 9: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 5 jmax -> block 10: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 6 imax -> block 7: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 6 jmax -> block 11: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 7 imax -> block 8: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 7 jmax -> block 12: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 8 imax -> block 9: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 9 imax -> block 10: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 9 jmax -> block 13: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 10 jmax -> block 14: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 11 imax -> block 12: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 11 jmax -> block 15: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 12 jmax -> block 16: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 13 imax -> block 14: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 13 jmax -> block 18: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 14 jmax -> block 19: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 15 imax -> block 16: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 15 jmax -> block 20: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 16 imax -> block 17: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 16 jmax -> block 21: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 17 imax -> block 18: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 17 jmax -> block 22: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 18 imax -> block 19: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 18 jmax -> block 23: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 19 jmax -> block 24: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 20 imax -> block 21: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 21 imax -> block 22: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 22 imax -> block 23: normal_ratio=1.000000000000e+00, normal_width=[1.162574972500e-05, 1.162574972500e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
+  block 23 imax -> block 24: normal_ratio=1.000000000000e+00, normal_width=[1.642390160614e-05, 1.642390160614e-05], node_mismatch=0.000000000000e+00, tangent_width_mismatch=0.000000000000e+00
