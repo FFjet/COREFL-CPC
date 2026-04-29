@@ -193,6 +193,22 @@ void cfd::Parameter::deduce_known_info() {
     return;
   }
 
+  auto validate_tpb = [this](const std::string &name) {
+    const auto &tpb = get_int_array(name);
+    const long long n_thread = tpb.size() == 3 ? static_cast<long long>(tpb[0]) * tpb[1] * tpb[2] : 0;
+    if (tpb.size() != 3 || tpb[0] <= 0 || tpb[1] <= 0 || tpb[2] <= 0 ||
+        n_thread > 1024) {
+      if (get_int("myid") == 0) {
+        printf("%s must contain exactly three positive integers and at most 1024 total threads.\n", name.c_str());
+      }
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+  };
+  validate_tpb("viscous_flux_tpb_2d");
+  validate_tpb("viscous_flux_tpb_3d");
+  validate_tpb("viscous_derivative_tpb_2d");
+  validate_tpb("viscous_derivative_tpb_3d");
+
   // Ghost grid number is decided from the inviscid scheme and viscous scheme.
   // For common 2nd order schemes, we need 2 ghost grids.
   // Here, because we now only implement 2nd order central difference for viscous flux, we need 2 ghost grids.
@@ -379,6 +395,10 @@ void cfd::Parameter::setup_default_settings() {
   int_parameters["limiter"] = 0;                 // minmod
   real_parameters["entropy_fix_factor"] = 0.125; // For Roe scheme, we need an entropy fix factor.
   int_parameters["viscous_order"] = 2;           // The default viscous order is 2.
+  int_array["viscous_flux_tpb_2d"] = {16, 16, 1};
+  int_array["viscous_flux_tpb_3d"] = {32, 8, 2};
+  int_array["viscous_derivative_tpb_2d"] = {32, 16, 1};
+  int_array["viscous_derivative_tpb_3d"] = {32, 8, 2};
   bool_parameters["gradPInDiffusionFlux"] = false;
   string_parameters["hybrid_inviscid_scheme"] = "NO";
   int_parameters["shock_sensor"] = 0;
@@ -490,6 +510,7 @@ void cfd::Parameter::setup_default_settings() {
 
   int_parameters["output_time_series"] = 0;
   bool_parameters["limit_flow"] = false;
+  bool_parameters["profile_rk_breakdown"] = false;
 
   // flamelet model
   int_parameters["flamelet_format"] = 0;
@@ -729,6 +750,18 @@ void cfd::Parameter::deduce_sim_info(const Species &spec) {
     }
 
     printf("\t->-> %-20d : order CDS for viscous flux\n", get_int("viscous_order"));
+    const auto &viscous_flux_tpb_2d = get_int_array("viscous_flux_tpb_2d");
+    const auto &viscous_flux_tpb_3d = get_int_array("viscous_flux_tpb_3d");
+    const auto &viscous_derivative_tpb_2d = get_int_array("viscous_derivative_tpb_2d");
+    const auto &viscous_derivative_tpb_3d = get_int_array("viscous_derivative_tpb_3d");
+    printf("\t->-> %-3d %-3d %-3d        : 2D viscous flux tpb\n", viscous_flux_tpb_2d[0],
+           viscous_flux_tpb_2d[1], viscous_flux_tpb_2d[2]);
+    printf("\t->-> %-3d %-3d %-3d        : 3D viscous flux tpb\n", viscous_flux_tpb_3d[0],
+           viscous_flux_tpb_3d[1], viscous_flux_tpb_3d[2]);
+    printf("\t->-> %-3d %-3d %-3d        : 2D viscous derivative tpb\n", viscous_derivative_tpb_2d[0],
+           viscous_derivative_tpb_2d[1], viscous_derivative_tpb_2d[2]);
+    printf("\t->-> %-3d %-3d %-3d        : 3D viscous derivative tpb\n", viscous_derivative_tpb_3d[0],
+           viscous_derivative_tpb_3d[1], viscous_derivative_tpb_3d[2]);
 
     if (get_bool("turbulence")) {
       bool need_ras_model{false};

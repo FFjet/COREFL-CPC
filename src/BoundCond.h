@@ -123,6 +123,9 @@ struct Wall {
   real Tm[5] = {};
   // For circular cylinder, the shock wave may not develop to the stagnation point. Blow it to develop!
   int if_blow_shock_wave = 0;
+  real blow_shock_wave_coefficient = 0.1;
+  int blow_shock_wave_start_step = 0;
+  int blow_shock_wave_end_step = 50;
 };
 
 struct Outflow {

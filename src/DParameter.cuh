@@ -131,6 +131,9 @@ struct DParameter {
   real rho_ref = 1.0;
   real a_ref2 = 1.0;
   real v_ref = 1.0;
+  real ux_ref = 1.0;
+  real uy_ref = 0.0;
+  real uz_ref = 0.0;
   real T_ref = 1.0;
   real mach_ref = 0;
   real p_ref = 1.0;

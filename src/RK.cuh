@@ -4,6 +4,7 @@
 #include "TimeAdvanceFunc.cuh"
 #include "Parallel.h"
 #include <random>
+#include <chrono>
 #include "SpongeLayer.cuh"
 #include "Fluctuation.cuh"
 
@@ -86,7 +87,18 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
   const auto need_physical_time{parameter.get_bool("need_physical_time")};
   const auto have_sponge_layer{parameter.get_bool("sponge_layer")};
   const auto hybrid_inviscid_scheme{parameter.get_string("hybrid_inviscid_scheme")};
+  const bool profile_rk_breakdown{parameter.get_bool("profile_rk_breakdown")};
   constexpr real rk_stage_dt_scale[3]{1.0, 0.25, 2.0 / 3.0};
+  using Clock = std::chrono::steady_clock;
+  auto profile_start = [&]() {
+    if (profile_rk_breakdown) cudaDeviceSynchronize();
+    return Clock::now();
+  };
+  auto profile_stop = [&](Clock::time_point t0, double &accumulator) {
+    if (!profile_rk_breakdown) return;
+    cudaDeviceSynchronize();
+    accumulator += std::chrono::duration<double>(Clock::now() - t0).count();
+  };
 
   std::random_device rd;
   std::mt19937 gen(rd());
@@ -94,6 +106,9 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
 
   while (!finished) {
     ++step;
+    double prof_pre_rk{}, prof_zero_dq{}, prof_viscous{}, prof_chemistry{}, prof_inviscid{};
+    double prof_non_reflecting{}, prof_update_cv{}, prof_vt{}, prof_limit_bc{}, prof_comm{}, prof_property{};
+    auto t_prof = profile_start();
 
     if (need_physical_time) {
       update_physical_time<<<1, 1>>>(param, physical_time);
@@ -143,36 +158,52 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
         compute_fluctuation(mesh[b], field[b].d_ptr, param, fluctuation_form, parameter, dist, gen);
       }
     }
+    profile_stop(t_prof, prof_pre_rk);
 
     // Rk inner iteration
     for (int rk = 0; rk < 3; ++rk) {
+      t_prof = profile_start();
       for (auto b = 0; b < n_block; ++b) {
         // Set dq to 0
         cudaMemset(field[b].h_ptr->dq.data(), 0, field[b].h_ptr->dq.size() * n_var * sizeof(real));
       }
+      profile_stop(t_prof, prof_zero_dq);
 
+      t_prof = profile_start();
       compute_viscous_flux<mix_model>(mesh, field, param, parameter);
+      profile_stop(t_prof, prof_viscous);
 
       for (auto b = 0; b < n_block; ++b) {
         // First, compute the source term, because properties such as mut are updated here, which is used by computing dt.
         if (parameter.get_int("reaction") == 1) {
+          t_prof = profile_start();
           finite_rate_chemistry<<<bpg[b], tpb>>>(field[b].d_ptr, param);
+          profile_stop(t_prof, prof_chemistry);
         }
 
         // Second, for each block, compute the residual dq
+        t_prof = profile_start();
         compute_inviscid_flux<mix_model>(mesh[b], field[b].d_ptr, param, n_var, parameter);
+        profile_stop(t_prof, prof_inviscid);
 
         // Explicit temporal schemes should not use any implicit treatment.
 
         // Apply the non-reflecting boundary condition
+        t_prof = profile_start();
         driver.bound_cond.template nonReflectingBoundary<mix_model>(mesh[b], field[b], param);
+        profile_stop(t_prof, prof_non_reflecting);
 
         // update basic variables
+        t_prof = profile_start();
         update_cv_and_bv_rk<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param, dt, rk);
+        profile_stop(t_prof, prof_update_cv);
         if constexpr (kTwoTemperature) {
+          t_prof = profile_start();
           apply_vt_relaxation_rk<<<bpg[b], tpb>>>(field[b].d_ptr, param, rk_stage_dt_scale[rk] * dt);
+          profile_stop(t_prof, prof_vt);
         }
 
+        t_prof = profile_start();
         // limit unphysical values computed by the program
         if (parameter.get_bool("limit_flow"))
           limit_flow<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param);
@@ -180,8 +211,10 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
         // Apply boundary conditions before interface communication to match the legacy 1T path.
         driver.bound_cond.template apply_boundary_conditions<mix_model>(mesh[b], field[b], param, step);
         update_values_with_fluctuations<<<bpg[b], tpb>>>(field[b].d_ptr, param);
+        profile_stop(t_prof, prof_limit_bc);
       }
       // Third, transfer data between and within processes
+      t_prof = profile_start();
       data_communication<mix_model>(mesh, field, parameter, step, param);
 
       if (mesh.dimension == 2) {
@@ -191,13 +224,16 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
           eliminate_k_gradient<<<BPG, tpb>>>(field[b].d_ptr, param);
         }
       }
+      profile_stop(t_prof, prof_comm);
 
       // update physical properties such as Mach number, transport coefficients et, al.
+      t_prof = profile_start();
       for (auto b = 0; b < n_block; ++b) {
         const int mx{mesh[b].mx}, my{mesh[b].my}, mz{mesh[b].mz};
         dim3 BPG{(mx + ng_1) / tpb.x + 1, (my + ng_1) / tpb.y + 1, (mz + ng_1) / tpb.z + 1};
         update_physical_properties<mix_model><<<BPG, tpb>>>(field[b].d_ptr, param);
       }
+      profile_stop(t_prof, prof_property);
     }
 
     // Finally, test if the simulation reaches convergence state
@@ -208,6 +244,14 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
       if (driver.myid == 0) {
         unsteady_screen_output(step, err_max, driver.time, driver.res, dt, physical_time);
       }
+    }
+    if (profile_rk_breakdown && driver.myid == 0) {
+      const double prof_total = prof_pre_rk + prof_zero_dq + prof_viscous + prof_chemistry + prof_inviscid +
+          prof_non_reflecting + prof_update_cv + prof_vt + prof_limit_bc + prof_comm + prof_property;
+      printf("RK profile step %d: total=%e pre=%e zero=%e viscous=%e chemistry=%e inviscid=%e nonreflect=%e "
+             "update_cv=%e vt=%e limit_bc=%e comm=%e property=%e\n", step, prof_total, prof_pre_rk, prof_zero_dq,
+             prof_viscous, prof_chemistry, prof_inviscid, prof_non_reflecting, prof_update_cv, prof_vt, prof_limit_bc,
+             prof_comm, prof_property);
     }
     cudaDeviceSynchronize();
     if (physical_time >= total_simulation_time || step == total_step) {

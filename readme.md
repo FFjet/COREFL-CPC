@@ -52,6 +52,84 @@ The compilation consists of the following steps:
 
 The executable COREFL should appear in ths current folder.
 
+### Two-temperature hypersonic mode
+
+The two-temperature implementation is selected at compile time. Configure with `COREFL_ENABLE_TWO_TEMPERATURE=ON`:
+
+```bash
+cmake -S . -B build-2t -DCMAKE_BUILD_TYPE=Release -DCOREFL_ENABLE_TWO_TEMPERATURE=ON
+cmake --build build-2t --parallel 16
+cp corefl corefl-2t
+```
+
+The top-level `CMakeLists.txt` currently defaults to `MAX_SPEC_NUMBER=9`, `MAX_REAC_NUMBER=19`, `MAX_PASSIVE_SCALAR_NUMBER=1`, NASA9-capable thermodynamics, and `Combustion2Part`. These defaults match the provided AIR5 two-temperature example. Increase `MAX_SPEC_NUMBER` or `MAX_REAC_NUMBER` before configuring if the mechanism is larger.
+
+Runtime constraints for the two-temperature path are enforced in `src/Parameter.cpp`:
+
+```text
+bool steady = 0
+int temporal_scheme = 3
+int species = 1
+int reaction = 1
+```
+
+The flamelet path, steady update, dual-time stepping, and Wu splitting are intentionally blocked for now because `rhoEve` chemistry/VT relaxation is not wired into those update paths. In the enabled RK3 path, the chemical `rhoEve` source is explicit.
+
+The added conservative variable is `rhoEve`, stored as scalar `Eve` after the species mass fractions. The output variable `Tve` is also available. The implemented frozen two-temperature energy split is:
+
+```text
+E = 0.5 * (u^2 + v^2 + w^2) + e_tr(T,Y) + Eve
+h_tr,s(T) = h_eq,s(T) - E_ve,s(T)
+F_Eve^inv = rho * Eve * U_k
+S_Eve = theta_tr:ve + sum_s omega_s * E_ve,s(Tve)
+```
+
+The viscous sign convention follows the existing species equation implementation. The physical species diffusion flux is `J_s`, so the species equation contains `div(-J_s)`. COREFL stores the species viscous flux as:
+
+```text
+D_s^code = -J_s
+```
+
+This is visible in `src/ViscousScheme.cu`: the stored species flux is proportional to `+rhoD_s grad(Y_s)` in the simple Fick limit, and the viscous residual adds the divergence of the stored flux. With that convention, the two-temperature viscous fluxes implemented in the solver are:
+
+```text
+F_Eve^vis = kappa_ve * grad(Tve)
+           + sum_s D_s^code * E_ve,s(Tve)
+
+F_E^vis = u dot tau + kappa_tr * grad(T) + kappa_ve * grad(Tve)
+          + sum_s D_s^code * (h_tr,s(T) + E_ve,s(Tve))
+```
+
+The nonequilibrium diffusion enthalpy helper in `src/Thermo.cuh` computes `h_eq,s(T) - E_ve,s(T) + E_ve,s(Tve)`, which is exactly `h_tr,s(T) + E_ve,s(Tve)`. The 2nd-order face kernels and the 8th-order collocated kernels in `src/ViscousScheme.cu` use this same expression for total energy. The 8th-order scalar kernel also explicitly writes the `rhoEve` viscous flux into `fFlux/gFlux/hFlux` before the 8th-order derivative is taken, so the `rhoEve` derivative does not read an old or unset flux value.
+
+The wall heat-flux post-processing in `src/PostProcess.cu` uses the same split:
+
+```text
+q_tr = kappa_tr * n dot grad(T)
+       + sum_s D_s^code * h_tr,s(T)
+
+q_ve = kappa_ve * n dot grad(Tve)
+       + sum_s D_s^code * E_ve,s(Tve)
+
+q_total = q_tr + q_ve
+```
+
+A useful consistency check is not to add `q_ve` to a total-energy diffusion term that already used `h_tr,s(T) + E_ve,s(Tve)` for species diffusion; doing so would count `sum_s D_s^code * E_ve,s(Tve)` twice. `src/PostProcess.cu` keeps `q_tr` and `q_ve` separate first, then forms `q_total`.
+
+The main implementation files are:
+
+- `src/Define.h`, `CMakeLists.txt`: compile-time `kTwoTemperature` switch.
+- `src/Parameter.cpp`, `src/DParameter.*`, `src/Field.*`: variable indexing, `Eve`, `Tve`, and storage.
+- `src/ChemData.*`, `src/Thermo.*`: NASA thermodynamics split into translational-rotational and vibrational-electronic parts, `two_temperature.dat`, and Landau-Teller data.
+- `src/FieldOperation.*`: conservative/primitive conversion, `Tve` inversion, total-energy closure, and exact exponential VT update.
+- `src/FiniteRateChem.cu`: `sum_s omega_s E_ve,s(Tve)` source and two-temperature reaction-control temperatures.
+- `src/InviscidScheme.cu`, `src/WENO.cu`: convective `rhoEve` flux and characteristic WENO projection.
+- `src/ViscousScheme.cu`: `Tve` conduction, `rhoEve` viscous flux, and nonequilibrium enthalpy in total-energy diffusion.
+- `src/PostProcess.cu`: wall `q_tr`, `q_ve`, and `q_total` split.
+- `src/RK.cuh`: RK3-stage VT relaxation.
+
+The detailed characteristic derivation and equation-to-code audit are in `docs/two_temperature_weno_characteristic_derivation.md`.
+
 ### The use of readGrid
 
 COREFL reads the structured multiblock grid files in `Plot3D` format. We can not partition the blocks automatically. Therefore, if you want a parallel computation with multiple blocks, you need to partition the blocks manually.
@@ -134,6 +212,77 @@ mpirun -n 8 \ # total number of processes to be started
 With the above script, the corefl will be started. An `output` folder will be created which contains all output files.
 
 In the output folder, a file named `flowfield.plt` will be created, which is the instantaneous flowfield file. A folder called `message` will also be created. The flowfield file, and the message folder, are necessary for starting a computation with existing results.
+
+### Run the two-temperature AIR5 example
+
+The example case is `example/squareCylinder2D_M10_air5_dns`. It contains `input/setup_2t.txt`, `input/chemistry/air5_park.inp`, and `input/chemistry/two_temperature.dat`.
+
+After building a two-temperature executable as `corefl-2t`, run:
+
+```bash
+cd example/squareCylinder2D_M10_air5_dns
+./run_2t.sh
+```
+
+If the executable has a different path, set `COREFL_2T_BIN`:
+
+```bash
+COREFL_2T_BIN=/path/to/corefl ./run_2t.sh
+```
+
+The script regenerates the mesh, copies `input/setup_2t.txt` to `input/setup.txt`, clears previous output, and starts the executable. Important setup entries are:
+
+```text
+int therm_nasa_7_9 = 9
+string mechanism_file = chemistry/air5_park.inp
+string two_temperature_file = chemistry/two_temperature.dat
+bool enable_vt_relaxation = 1
+real Tve = 300.0
+```
+
+Boundary/profile input may provide either `EVE` directly or `Tve`; if `Tve` is provided, COREFL computes the corresponding mixture `Eve` from the local species composition.
+
+### Optional wall blowing for 1T hypersonic startup
+
+For the Mach-10 AIR5 square-cylinder case, the one-temperature calculation can lock onto a collapsed near-wall branch during startup before a detached bow shock is established. A short wall-normal blowing stage can be enabled on the wall boundary to seed the detached shock without overriding the wall pressure.
+
+The option is configured inside the wall boundary block in `setup.txt`:
+
+```text
+struct square_wall {
+    string type = wall
+    int label = 2
+    string thermal_type = adiabatic
+    int catalytic_type = 0
+    int if_blow_shock_wave = 1
+    real blow_shock_wave_coefficient = 1.0
+    int blow_shock_wave_start_step = 3000
+    int blow_shock_wave_end_step = 6000
+}
+```
+
+The parameters are:
+
+- `if_blow_shock_wave`: enables the temporary wall-normal blowing when set to `1`; the default is `0`.
+- `blow_shock_wave_coefficient`: multiplier for the local incoming normal velocity. The tested value for this case is `1.0`; a smaller value such as `0.3` was not enough to keep the 1T solution away from the collapsed branch.
+- `blow_shock_wave_start_step` and `blow_shock_wave_end_step`: inclusive RK-step window for the forcing. With `dt = 5.0e-10`, the `3000..6000` window corresponds to `1.5e-6..3.0e-6 s`.
+
+For a fresh 1T AIR5 run to `2.0e-5 s`, the corresponding control settings used in the square-cylinder test were:
+
+```text
+int total_step = 40000
+real total_simulation_time = 2.0e-5
+int output_time_series = 1000
+```
+
+On a workstation with multiple GPUs, select an idle GPU with `CUDA_VISIBLE_DEVICES`:
+
+```bash
+cd example/squareCylinder2D_M10_air5_dns
+CUDA_VISIBLE_DEVICES=1 /path/to/corefl
+```
+
+A useful sanity check for this setup is the centerline bow-shock standoff distance at `2.0e-5 s`. In the tested AIR5 square-cylinder case, the 1T blow-only run gave about `8.55e-4 m`, while the 2T reference was about `9.19e-4 m`; the collapsed 1T branch stayed near `2.33e-5 m`. No wall pressure override is needed for this configuration.
 
 ## Example setup
 
@@ -234,7 +383,19 @@ Third, about the spatial schemes:
 int shock_sensor = 2   // Ducros sensor (0), modified Jameson sensor (1), sensor based on density and pressure jump (2)
 real shockSensor_threshold = -0.2 // A negative value means all points are computed by WENO scheme.
 int viscous_order = 2   // inviscid(0), 2nd order (2), 8th order (8)
+array int viscous_flux_tpb_2d {
+ 16 16 1
+}
+array int viscous_derivative_tpb_2d {
+ 32 16 1
+}
 ```
+
+The viscous-kernel CUDA block sizes can be overridden from `setup.txt` with `viscous_flux_tpb_2d`,
+`viscous_flux_tpb_3d`, `viscous_derivative_tpb_2d`, and `viscous_derivative_tpb_3d`. Each array must
+contain three positive integers and no more than 1024 total threads. The default 2D flux block is
+`16 16 1`, which is the safe setting for the register-heavy two-temperature 8th-order scalar viscous
+flux kernel; the default 2D derivative block is `32 16 1`.
 
 Fourth, about the chemistry
 

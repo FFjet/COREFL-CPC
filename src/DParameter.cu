@@ -21,7 +21,11 @@ cfd::DParameter::DParameter(Parameter &parameter, const Species &species, Reacti
   Sct(parameter.get_real("turbulent_schmidt_number")),
   rho_ref{parameter.get_real("rho_inf")},
   a_ref2{parameter.get_real("speed_of_sound") * parameter.get_real("speed_of_sound")},
-  v_ref{parameter.get_real("v_inf")}, T_ref{parameter.get_real("T_inf")}, mach_ref{parameter.get_real("M_inf")},
+  v_ref{parameter.get_real("v_inf")},
+  ux_ref{parameter.get_real("ux_inf")},
+  uy_ref{parameter.get_real("uy_inf")},
+  uz_ref{parameter.get_real("uz_inf")},
+  T_ref{parameter.get_real("T_inf")}, mach_ref{parameter.get_real("M_inf")},
   p_ref{parameter.get_real("p_inf")}, weno_eps_scale{
     parameter.get_real("rho_inf") * parameter.get_real("v_inf") * parameter.get_real("rho_inf") *
     parameter.get_real("v_inf")

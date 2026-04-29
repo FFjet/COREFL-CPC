@@ -4,6 +4,23 @@
 #include "Thermo.cuh"
 
 namespace cfd {
+namespace {
+dim3 viscous_tpb_from_setup(const Parameter &parameter, const char *name) {
+  const auto &tpb = parameter.get_int_array(name);
+  return {static_cast<unsigned>(tpb[0]), static_cast<unsigned>(tpb[1]), static_cast<unsigned>(tpb[2])};
+}
+
+dim3 viscous_flux_tpb(const Parameter &parameter, int dim) {
+  return dim == 2 ? viscous_tpb_from_setup(parameter, "viscous_flux_tpb_2d")
+                  : viscous_tpb_from_setup(parameter, "viscous_flux_tpb_3d");
+}
+
+dim3 viscous_derivative_tpb(const Parameter &parameter, int dim) {
+  return dim == 2 ? viscous_tpb_from_setup(parameter, "viscous_derivative_tpb_2d")
+                  : viscous_tpb_from_setup(parameter, "viscous_derivative_tpb_3d");
+}
+}
+
 template<MixtureModel mix_model> void compute_viscous_flux(const Mesh &mesh, std::vector<Field> &field,
   DParameter *param, const Parameter &parameter) {
   const int viscous_order = parameter.get_int("viscous_order");
@@ -17,9 +34,7 @@ template<MixtureModel mix_model> void compute_viscous_flux(const Mesh &mesh, std
       const auto mx = block.mx, my = block.my, mz = block.mz;
       const int dim{mz == 1 ? 2 : 3};
 
-      dim3 tpb = {32, 8, 2};
-      if (dim == 2)
-        tpb = {32, 16, 1};
+      const dim3 tpb = viscous_flux_tpb(parameter, dim);
       dim3 BPG{(mx - 1) / tpb.x + 1, (my - 1) / tpb.y + 1, (mz - 1) / tpb.z + 1};
 
       auto bpg = dim3(mx/*+1-1*/ / tpb.x + 1, (my - 1) / tpb.y + 1, (mz - 1) / tpb.z + 1);
@@ -32,7 +47,7 @@ template<MixtureModel mix_model> void compute_viscous_flux(const Mesh &mesh, std
       compute_dGv_dy<<<BPG, tpb>>>(zone, param);
 
       if (dim == 3) {
-        dim3 TPB = {32, 8, 2};
+        const dim3 TPB = viscous_flux_tpb(parameter, dim);
         bpg = dim3((mx - 1) / TPB.x + 1, (my - 1) / TPB.y + 1, mz/*+1-1*/ / TPB.z + 1);
         compute_hv_2nd_order<mix_model><<<bpg, TPB>>>(zone, param);
 
@@ -45,9 +60,7 @@ template<MixtureModel mix_model> void compute_viscous_flux(const Mesh &mesh, std
       const auto mx = block.mx, my = block.my, mz = block.mz;
       const int dim{mz == 1 ? 2 : 3};
 
-      dim3 tpb = {32, 8, 2};
-      if (dim == 2)
-        tpb = {32, 16, 1};
+      const dim3 tpb = viscous_flux_tpb(parameter, dim);
       auto bpg = dim3((mx - 1) / tpb.x + 1, (my - 1) / tpb.y + 1, (mz - 1) / tpb.z + 1);
       compute_viscous_flux_collocated<mix_model, 8><<<bpg, tpb>>>(field[b].d_ptr, param);
 
@@ -63,9 +76,7 @@ template<MixtureModel mix_model> void compute_viscous_flux(const Mesh &mesh, std
       const auto mx = block.mx, my = block.my, mz = block.mz;
       const int dim{mz == 1 ? 2 : 3};
 
-      dim3 tpb = {32, 8, 2};
-      if (dim == 2)
-        tpb = {32, 16, 1};
+      const dim3 tpb = viscous_derivative_tpb(parameter, dim);
       auto bpg = dim3((mx - 1) / tpb.x + 1, (my - 1) / tpb.y + 1, (mz - 1) / tpb.z + 1);
       compute_viscous_flux_derivative<8><<<bpg,tpb>>>(field[b].d_ptr, param);
     }
@@ -689,23 +700,68 @@ template<int ORDER> __global__ void compute_viscous_flux_collocated_scalar(DZone
   const real tm = pv(i, j, k, 5);
   compute_enthalpy(tm, h, param);
 
+  real tve_m{tm};
+  real eve_flux_x{0}, eve_flux_y{0}, eve_flux_z{0};
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      tve_m = zone->temperature_ve(i, j, k);
+      const auto &tve_field = zone->temperature_ve;
+      const real tve_xi = d_dXi<ORDER>(tve_field, i, j, k, mx, compute_type[0], compute_type[1]);
+      const real tve_eta = d_dEta<ORDER>(tve_field, i, j, k, my, compute_type[2], compute_type[3]);
+      const real tve_zeta = d_dZeta<ORDER>(tve_field, i, j, k, mz, compute_type[4], compute_type[5]);
+      const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
+      const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
+      const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
+      const real conductivity_ve = zone->thermal_conductivity_ve(i, j, k);
+      eve_flux_x = conductivity_ve * (xi_x * tve_x + xi_y * tve_y + xi_z * tve_z);
+      eve_flux_y = conductivity_ve * (eta_x * tve_x + eta_y * tve_y + eta_z * tve_z);
+      eve_flux_z = conductivity_ve * (zeta_x * tve_x + zeta_y * tve_y + zeta_z * tve_z);
+    }
+  }
+
   auto &fv = zone->fFlux, &gv = zone->gFlux, &hv = zone->hFlux;
   for (int l = 0; l < n_spec; ++l) {
+    real h_diff = h[l];
+    real eve_l = 0;
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
+        eve_l = compute_ve_energy(l, tve_m, param);
+      }
+    }
+
     real diffusion_flux = diffusivity[l] * (driven_force_x[l] - mw_tot * yk[l] * sum_GradXi_cdot_GradY_over_wl) -
                           yk[l] * CorrectionVelocityTerm[0];
     fv(i, j, k, 5 + l) = diffusion_flux;
     // Add the influence of species diffusion on total energy
-    fv(i, j, k, 4) += h[l] * diffusion_flux;
+    fv(i, j, k, 4) += h_diff * diffusion_flux;
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) eve_flux_x += eve_l * diffusion_flux;
+    }
 
     diffusion_flux = diffusivity[l] * (driven_force_y[l] - mw_tot * yk[l] * sumGradEta_cdot_GradY_over_wl) -
                      yk[l] * CorrectionVelocityTerm[1];
     gv(i, j, k, 5 + l) = diffusion_flux;
-    gv(i, j, k, 4) += h[l] * diffusion_flux;
+    gv(i, j, k, 4) += h_diff * diffusion_flux;
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) eve_flux_y += eve_l * diffusion_flux;
+    }
 
     diffusion_flux = diffusivity[l] * (driven_force_z[l] - mw_tot * yk[l] * sumGradZeta_cdot_GradY_over_wl) -
                      yk[l] * CorrectionVelocityTerm[2];
     hv(i, j, k, 5 + l) = diffusion_flux;
-    hv(i, j, k, 4) += h[l] * diffusion_flux;
+    hv(i, j, k, 4) += h_diff * diffusion_flux;
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) eve_flux_z += eve_l * diffusion_flux;
+    }
+  }
+
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      fv(i, j, k, 5 + param->i_eve) = eve_flux_x;
+      gv(i, j, k, 5 + param->i_eve) = eve_flux_y;
+      hv(i, j, k, 5 + param->i_eve) = eve_flux_z;
+    }
   }
 
 
@@ -943,6 +999,12 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
     real h[MAX_SPEC_NUMBER];
     const real tm = 0.5 * (pv(i, j, k, 5) + pv(i + 1, j, k, 5));
     compute_enthalpy(tm, h, param);
+    real tve_m{tm};
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i + 1, j, k));
+      }
+    }
 
     for (int l = 0; l < n_spec; ++l) {
       const real diffusion_flux{
@@ -950,13 +1012,16 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
         - yk[l] * CorrectionVelocityTerm
       };
       fv(i, j, k, 4 + l) = diffusion_flux;
+      real h_diff = h[l];
+      if constexpr (kTwoTemperature) {
+        if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
+      }
       // Add the influence of species diffusion on total energy
-      fv(i, j, k, 3) += h[l] * diffusion_flux;
+      fv(i, j, k, 3) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i + 1, j, k));
         const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
         const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
         const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
@@ -967,7 +1032,7 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
         fv(i, j, k, 3) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux -= compute_ve_energy(l, tve_m, param) * fv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * fv(i, j, k, 4 + l);
         }
         fv(i, j, k, 4 + param->i_eve) = eve_flux;
       }
@@ -1161,6 +1226,12 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
     real h[MAX_SPEC_NUMBER];
     const real tm = 0.5 * (pv(i, j, k, 5) + pv(i, j + 1, k, 5));
     compute_enthalpy(tm, h, param);
+    real tve_m{tm};
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j + 1, k));
+      }
+    }
 
     for (int l = 0; l < n_spec; ++l) {
       const real diffusion_flux{
@@ -1168,13 +1239,16 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
         - yk[l] * CorrectionVelocityTerm
       };
       gv(i, j, k, 4 + l) = diffusion_flux;
+      real h_diff = h[l];
+      if constexpr (kTwoTemperature) {
+        if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
+      }
       // Add the influence of species diffusion on total energy
-      gv(i, j, k, 3) += h[l] * diffusion_flux;
+      gv(i, j, k, 3) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j + 1, k));
         const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
         const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
         const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
@@ -1185,7 +1259,7 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
         gv(i, j, k, 3) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux -= compute_ve_energy(l, tve_m, param) * gv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * gv(i, j, k, 4 + l);
         }
         gv(i, j, k, 4 + param->i_eve) = eve_flux;
       }
@@ -1375,6 +1449,12 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
     real h[MAX_SPEC_NUMBER];
     const real tm = 0.5 * (pv(i, j, k, 5) + pv(i, j, k + 1, 5));
     compute_enthalpy(tm, h, param);
+    real tve_m{tm};
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j, k + 1));
+      }
+    }
 
     for (int l = 0; l < n_spec; ++l) {
       const real diffusion_flux{
@@ -1382,13 +1462,16 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
         - yk[l] * CorrectionVelocityTerm
       };
       hv(i, j, k, 4 + l) = diffusion_flux;
+      real h_diff = h[l];
+      if constexpr (kTwoTemperature) {
+        if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
+      }
       // Add the influence of species diffusion on total energy
-      hv(i, j, k, 3) += h[l] * diffusion_flux;
+      hv(i, j, k, 3) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        const real tve_m = 0.5 * (zone->temperature_ve(i, j, k) + zone->temperature_ve(i, j, k + 1));
         const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
         const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
         const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
@@ -1399,7 +1482,7 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
         hv(i, j, k, 3) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux -= compute_ve_energy(l, tve_m, param) * hv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * hv(i, j, k, 4 + l);
         }
         hv(i, j, k, 4 + param->i_eve) = eve_flux;
       }

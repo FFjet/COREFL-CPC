@@ -571,7 +571,6 @@ cfd::Wall::Wall(const std::map<std::string, std::variant<std::string, int, real>
     temperature = parameter.get_real("T_inf");
     parameter.update_parameter("if_compute_wall_distance", 1);
   }
-
   const int ns = parameter.get_int("n_spec");
   if (ns > 0 && info.contains("catalytic_type")) {
     catalytic_type = std::get<int>(info.at("catalytic_type"));
@@ -650,6 +649,15 @@ cfd::Wall::Wall(const std::map<std::string, std::variant<std::string, int, real>
   }
   if (info.find("if_blow_shock_wave") != info.end()) {
     if_blow_shock_wave = std::get<int>(info.at("if_blow_shock_wave"));
+  }
+  if (info.find("blow_shock_wave_coefficient") != info.end()) {
+    blow_shock_wave_coefficient = std::get<real>(info.at("blow_shock_wave_coefficient"));
+  }
+  if (info.find("blow_shock_wave_start_step") != info.end()) {
+    blow_shock_wave_start_step = std::get<int>(info.at("blow_shock_wave_start_step"));
+  }
+  if (info.find("blow_shock_wave_end_step") != info.end()) {
+    blow_shock_wave_end_step = std::get<int>(info.at("blow_shock_wave_end_step"));
   }
 }
 

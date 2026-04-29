@@ -191,7 +191,7 @@ __global__ void cfd::wall_friction_heatFlux_2d(DZone *zone, real *wall_data, con
     conductivity = mul / param->Pr * cp_air;
   }
 
-  real q_total_face = conductivity * (eta_x_div_jac * t_x + eta_y_div_jac * t_y + eta_z_div_jac * t_z);
+  real q_tr_face = conductivity * (eta_x_div_jac * t_x + eta_y_div_jac * t_y + eta_z_div_jac * t_z);
   real q_ve_face = 0.0;
 
   if (param->n_spec > 0) {
@@ -267,12 +267,14 @@ __global__ void cfd::wall_friction_heatFlux_2d(DZone *zone, real *wall_data, con
       const real diffusion_flux = diffusivity[l] *
                                       (diffusion_driven_force[l] - mw_tot * yk[l] * sum_grad_eta_dot_grad_y_over_wl) -
                                   yk[l] * correction_velocity_term;
-      q_total_face += h[l] * diffusion_flux;
+      real h_tr = h[l];
       if constexpr (kTwoTemperature) {
         if (param->i_eve >= 0) {
-          q_ve_face -= compute_ve_energy(l, tve_m, param) * diffusion_flux;
+          h_tr = h[l] - compute_ve_energy(l, tm, param);
+          q_ve_face += compute_ve_energy(l, tve_m, param) * diffusion_flux;
         }
       }
+      q_tr_face += h_tr * diffusion_flux;
     }
   } else if constexpr (kTwoTemperature) {
     if (param->i_eve >= 0) {
@@ -285,9 +287,9 @@ __global__ void cfd::wall_friction_heatFlux_2d(DZone *zone, real *wall_data, con
     }
   }
 
-  const real q_total = (q_total_face + q_ve_face) / face_area;
+  const real q_tr = q_tr_face / face_area;
   const real q_ve = q_ve_face / face_area;
-  const real q_tr = q_total - q_ve;
+  const real q_total = q_tr + q_ve;
 
   const real rho_w = max(pv(i, j, k, 0), static_cast<real>(1e-30));
   const real u_tau = sqrt(max(tau_w / rho_w, static_cast<real>(0.0)));

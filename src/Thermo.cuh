@@ -40,6 +40,12 @@ __device__ real invert_tve_from_eve(real eve_target, const real *y, real t_init,
 __device__ real compute_vt_relaxation_source(real density, real t, real tve, const real *y, const DParameter *param,
   real *eve_eq = nullptr, real *tau_eff = nullptr);
 
+__device__ __forceinline__ real compute_nonequilibrium_diffusion_enthalpy(
+  real h_eq, int i_spec, real t, real tve, const DParameter *param) {
+  if (!param->two_temperature || param->i_eve < 0) return h_eq;
+  return h_eq - compute_ve_energy(i_spec, t, param) + compute_ve_energy(i_spec, tve, param);
+}
+
 __device__ __forceinline__ void compute_mixture_characteristic_thermo(
   real t, const real *y, const DParameter *param, real *h_tr, real *scalar_alpha = nullptr,
   real *energy_coeff = nullptr, real *e_tr_mix = nullptr, real *r_mix = nullptr, real *cp_tr_mix = nullptr,

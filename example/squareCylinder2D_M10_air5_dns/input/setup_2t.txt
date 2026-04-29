@@ -22,6 +22,12 @@ real total_simulation_time = 2.0e-5
 
 int inviscid_scheme = 72
 int viscous_order = 2
+array int viscous_flux_tpb_2d {
+ 16 16 1
+}
+array int viscous_derivative_tpb_2d {
+ 32 16 1
+}
 bool positive_preserving = 1
 bool limit_flow = 1
 int print_nan = 1

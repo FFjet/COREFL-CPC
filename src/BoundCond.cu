@@ -3217,42 +3217,27 @@ template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *w
     }
   }
 
-  if (wall->if_blow_shock_wave && step >= 0 && step <= 50) {
-    gxl::Matrix<real, 3, 3, 1> bdJin;
-    real d1 = zone->metric(i, j, k, 3);
-    real d2 = zone->metric(i, j, k, 4);
-    real d3 = zone->metric(i, j, k, 5);
-    real kk = sqrt(d1 * d1 + d2 * d2 + d3 * d3);
-    bdJin(1, 1) = d1 / kk;
-    bdJin(1, 2) = d2 / kk;
-    bdJin(1, 3) = d3 / kk;
+  if (wall->if_blow_shock_wave && step >= wall->blow_shock_wave_start_step &&
+      step <= wall->blow_shock_wave_end_step) {
+    real nx{zone->metric(i, j, k, b.face * 3)}, ny{zone->metric(i, j, k, b.face * 3 + 1)},
+        nz{zone->metric(i, j, k, b.face * 3 + 2)};
+    const real normal_inv = b.direction / max(sqrt(nx * nx + ny * ny + nz * nz), static_cast<real>(1e-30));
+    nx *= normal_inv;
+    ny *= normal_inv;
+    nz *= normal_inv;
 
-    d1 = bdJin(1, 2) - bdJin(1, 3);
-    d2 = bdJin(1, 3) - bdJin(1, 1);
-    d3 = bdJin(1, 1) - bdJin(1, 2);
-    kk = sqrt(d1 * d1 + d2 * d2 + d3 * d3);
-    bdJin(2, 1) = d1 / kk;
-    bdJin(2, 2) = d2 / kk;
-    bdJin(2, 3) = d3 / kk;
-
-    d1 = bdJin(1, 2) * bdJin(2, 3) - bdJin(1, 3) * bdJin(2, 2);
-    d2 = bdJin(1, 3) * bdJin(2, 1) - bdJin(1, 1) * bdJin(2, 3);
-    d3 = bdJin(1, 1) * bdJin(2, 2) - bdJin(1, 2) * bdJin(2, 1);
-    kk = sqrt(d1 * d1 + d2 * d2 + d3 * d3);
-    bdJin(3, 1) = d1 / kk;
-    bdJin(3, 2) = d2 / kk;
-    bdJin(3, 3) = d3 / kk;
-
-    real u = bv(i - dir[0], j - dir[1], k - dir[2], 1),
-        v = bv(i - dir[0], j - dir[1], k - dir[2], 2),
-        w = bv(i - dir[0], j - dir[1], k - dir[2], 3);
-    real vn = bdJin(1, 1) * u + bdJin(1, 2) * v + bdJin(1, 3) * w;
-    real vt = bdJin(2, 1) * u + bdJin(2, 2) * v + bdJin(2, 3) * w;
-    real vs = bdJin(3, 1) * u + bdJin(3, 2) * v + bdJin(3, 3) * w;
-
-    bv(i, j, k, 1) = bdJin(2, 1) * vt + bdJin(3, 1) * vs - bdJin(1, 1) * vn;
-    bv(i, j, k, 2) = bdJin(2, 2) * vt + bdJin(3, 2) * vs - bdJin(1, 2) * vn;
-    bv(i, j, k, 3) = bdJin(2, 3) * vt + bdJin(3, 3) * vs - bdJin(1, 3) * vn;
+    const real vn_local = nx * bv(idx[0], idx[1], idx[2], 1) + ny * bv(idx[0], idx[1], idx[2], 2) +
+                          nz * bv(idx[0], idx[1], idx[2], 3);
+    const real vn_inf = nx * param->ux_ref + ny * param->uy_ref + nz * param->uz_ref;
+    const real seed_speed = step <= 50 ? max(vn_inf, static_cast<real>(0)) : static_cast<real>(0);
+    const real blow_speed = max(wall->blow_shock_wave_coefficient, static_cast<real>(0)) *
+                            max(max(vn_local, static_cast<real>(0)), seed_speed);
+    wall_u = -blow_speed * nx;
+    wall_v = -blow_speed * ny;
+    wall_w = -blow_speed * nz;
+    bv(i, j, k, 1) = wall_u;
+    bv(i, j, k, 2) = wall_v;
+    bv(i, j, k, 3) = wall_w;
   }
 
   int if_fluctuation = wall->fluctuation_type;
