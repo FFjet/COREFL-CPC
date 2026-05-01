@@ -913,9 +913,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_header() {
   // Each file should have only one header; thus we let process 0 to write it.
 
   MPI_Offset offset{0};
-  auto *offset_process = new MPI_Offset[mesh.n_proc];
-  auto *zone_number_process = new int[mesh.n_proc];
-  zone_number_process[0] = 0;
+  std::vector<MPI_Offset> offset_process(mesh.n_proc, 0);
+  std::vector<int> zone_number_process(mesh.n_proc, 0);
   var_name = parameter.get_string_array("var_name");
   n_var = static_cast<int>(var_name.size());
   if (myid == 0) {
@@ -1013,13 +1012,11 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_header() {
       MPI_File_write_at(fp, offset, &no_more_auxi_data, 1, MPI_INT32_T, &status);
       offset += 4;
 
-      // See which process this block belongs to.
-      if (i == disp[pid] - 1) {
-        pid++;
+      // See where the next process starts in the zone header.
+      if (pid + 1 < mesh.n_proc && i == disp[pid] - 1) {
+        ++pid;
         offset_process[pid] = offset;
-        if (pid < mesh.n_proc - 1) {
-          zone_number_process[pid] = i + 1;
-        }
+        zone_number_process[pid] = i + 1;
       }
     }
 
@@ -1031,9 +1028,9 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_header() {
 
     offset_header = offset;
   }
-  MPI_Scatter(offset_process, 1, MPI_OFFSET, &offset_zones, 1, MPI_OFFSET, 0, MPI_COMM_WORLD);
-  MPI_Scatter(zone_number_process, 1, MPI_INT, &zone_id, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  MPI_Bcast(&offset_header, 1, MPI_INT64_T, 0, MPI_COMM_WORLD);
+  MPI_Scatter(offset_process.data(), 1, MPI_OFFSET, &offset_zones, 1, MPI_OFFSET, 0, MPI_COMM_WORLD);
+  MPI_Scatter(zone_number_process.data(), 1, MPI_INT, &zone_id, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&offset_header, 1, MPI_OFFSET, 0, MPI_COMM_WORLD);
   //  MPI_Bcast(&n_var, 1, MPI_INT32_T, 0, MPI_COMM_WORLD);
   MPI_File_close(&fp);
 }

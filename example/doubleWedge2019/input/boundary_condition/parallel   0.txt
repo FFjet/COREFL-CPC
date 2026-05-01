@@ -1,3 +1,5 @@
-        3        0
-        0        0        0
+        1        2
+        2
 iMin  iMax  jMin  jMax  kMin  kMax   s_r_id  send_flag  recv_flag
+        1        1        1      641        1        1        1        1        0
+     4401     4401        1      641        1        1        1        2        3

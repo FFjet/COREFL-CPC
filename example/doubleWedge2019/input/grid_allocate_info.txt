@@ -1,4 +1,8 @@
 0 grid file:
-total grid number is 4705974
+total grid number is 2821041
+block number is 1
+block id is 1 
+1 grid file:
+total grid number is 2796683
 block number is 3
-block id is 0 1 2 
+block id is 0 2 3 

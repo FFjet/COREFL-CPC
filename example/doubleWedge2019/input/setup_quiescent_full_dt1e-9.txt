@@ -1,0 +1,110 @@
+bool parallel = 1
+
+string canonical_problem = general
+
+real gridScale = 1
+int gridIsBinary = 1
+int symmetric_conservative_metric = 0
+
+int initial = 0
+int total_step = 24000000
+int output_file = 24000000
+int output_screen = 200
+int output_time_series = 20000
+
+bool steady = 0
+real cfl = 0.5
+int implicit_method = 0
+int temporal_scheme = 3
+bool fixed_time_step = 1
+real dt = 1.0e-11
+real total_simulation_time = 2.4e-4
+
+int inviscid_scheme = 72
+int viscous_order = 8
+array int viscous_flux_tpb_2d {
+ 16 16 1
+}
+array int viscous_derivative_tpb_2d {
+ 32 16 1
+}
+bool positive_preserving = 1
+bool limit_flow = 1
+int print_nan = 1
+
+int species = 1
+int reaction = 1
+int hardCodedMech = 0
+string therm_file = chemistry/therm.dat
+string transport_file = chemistry/tran.dat
+string mechanism_file = chemistry/air5_park.inp
+int therm_nasa_7_9 = 9
+string two_temperature_file = chemistry/two_temperature.dat
+bool enable_vt_relaxation = 1
+
+bool turbulence = 0
+
+array int post_process {
+ 0
+}
+
+array string boundary_conditions {
+ freestream outflow symmetry wedge_wall
+}
+string reference_state = freestream
+string default_init = quiescent
+
+struct freestream {
+    string type = inflow
+    int label = 5
+    int inflow_type = 0
+    real velocity = 3812.0
+    real temperature = 710.0
+    real Tve = 710.0
+    real pressure = 780.0
+    real u = 1.0
+    real v = 0.0
+    real w = 0.0
+    real N2 = 0.77
+    real O2 = 0.23
+    real NO = 0.0
+    real N = 0.0
+    real O = 0.0
+}
+
+struct outflow {
+    string type = outflow
+    int label = 6
+}
+
+struct quiescent {
+    string type = inflow
+    int label = 5
+    int inflow_type = 0
+    real velocity = 0.0
+    real temperature = 710.0
+    real Tve = 710.0
+    real pressure = 780.0
+    real u = 1.0
+    real v = 0.0
+    real w = 0.0
+    real N2 = 0.77
+    real O2 = 0.23
+    real NO = 0.0
+    real N = 0.0
+    real O = 0.0
+}
+
+struct symmetry {
+    string type = symmetry
+    int label = 3
+}
+
+struct wedge_wall {
+    string type = wall
+    int label = 2
+    string thermal_type = isothermal
+    real temperature = 300.0
+    real Tve = 300.0
+    int catalytic_type = 0
+}

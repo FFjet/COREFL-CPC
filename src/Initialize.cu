@@ -123,6 +123,12 @@ void initialize_from_start(Parameter &parameter, const Mesh &mesh, std::vector<F
     const int tot_group{parameter.get_int("groups_init")};
     std::vector<Inflow> groups_inflow;
     const std::string default_init = parameter.get_string("default_init");
+    const std::string reference_state = parameter.get_string("reference_state");
+    if (reference_state != default_init) {
+      // Ensure reference quantities are available on every MPI rank, even when
+      // the rank does not own the physical inflow boundary.
+      [[maybe_unused]] Inflow reference_inflow(reference_state, species, parameter);
+    }
     Inflow default_inflow(default_init, species, parameter);
     groups_inflow.push_back(default_inflow);
 
