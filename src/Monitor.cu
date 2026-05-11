@@ -4,14 +4,164 @@
 #include "Parallel.h"
 #include "Field.h"
 #include "Mesh.h"
+#include "DParameter.cuh"
+#include "SinglePointStat.cuh"
+#include <algorithm>
+#include <chrono>
+#include <ctime>
 #include <fstream>
+#include <limits>
 #include <numeric>
+#include <sstream>
+#include <cmath>
 #include "ChemData.h"
 
 namespace cfd {
+namespace {
+struct MonitorBlockRecord {
+  int pid{-1};
+  int block_id{-1};
+  int il{0}, ir{0}, jl{0}, jr{0}, kl{0}, kr{0};
+  int frequency{0};
+  int if_burst{0};
+};
+
+enum BurstMetricIndex : int {
+  burst_sum_abs_flux  = 0,
+  burst_max_abs_flux  = 1,
+  burst_sum_abs_vflux = 2,
+  burst_max_abs_vflux = 3,
+  burst_max_abs_uY    = 4,
+  burst_max_abs_vY    = 5,
+  burst_metric_count  = 6
+};
+
+bool parse_monitor_block_record(const std::string &line, int default_frequency, MonitorBlockRecord &record) {
+  if (line.empty()) {
+    return false;
+  }
+  std::istringstream line_stream(line);
+  if (!(line_stream >> record.pid >> record.block_id >> record.il >> record.ir >> record.jl >> record.jr >>
+        record.kl >> record.kr)) {
+    return false;
+  }
+  record.frequency = default_frequency;
+  record.if_burst = 0;
+  if (int frequency; line_stream >> frequency) {
+    record.frequency = frequency;
+    if (int if_burst; line_stream >> if_burst) {
+      record.if_burst = if_burst != 0 ? 1 : 0;
+    }
+  }
+  return true;
+}
+
+__device__ inline void atomic_max_positive_real(real *address, real value) {
+  if (value <= 0) {
+    return;
+  }
+  auto *address_as_ull = reinterpret_cast<unsigned long long int *>(address);
+  unsigned long long int old = *address_as_ull;
+  while (__longlong_as_double(old) < value) {
+    const auto assumed = old;
+    old = atomicCAS(address_as_ull, assumed, __double_as_longlong(value));
+    if (old == assumed) {
+      break;
+    }
+  }
+}
+
+__device__ inline int classify_quadrant(real up, real vp, real yp) {
+  if (up > 0 && vp > 0 && yp > 0) return 1;
+  if (up < 0 && vp > 0 && yp > 0) return 2;
+  if (up < 0 && vp > 0 && yp < 0) return 3;
+  if (up > 0 && vp > 0 && yp < 0) return 4;
+  if (up > 0 && vp < 0 && yp > 0) return 5;
+  if (up < 0 && vp < 0 && yp > 0) return 6;
+  if (up < 0 && vp < 0 && yp < 0) return 7;
+  if (up > 0 && vp < 0 && yp < 0) return 8;
+  return 0;
+}
+
+__global__ void accumulate_burst_trigger_for_block(
+  DZone *zone, const DParameter *param, int il, int ir, int jl, int jr, int kl, int kr, int h2_species_index,
+  real burst_H, int *quadrant_counts, unsigned long long *point_count, real *metrics) {
+  const int nx = ir - il + 1;
+  const int ny = jr - jl + 1;
+  const int nz = kr - kl + 1;
+  const unsigned long long plane_size = static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  const unsigned long long total_points = plane_size * static_cast<unsigned long long>(nz);
+  const unsigned long long tid = static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long stride = static_cast<unsigned long long>(blockDim.x) * gridDim.x;
+
+  int local_quadrant_counts[8]{};
+  unsigned long long local_point_count = 0;
+  real local_sum_abs_flux = 0;
+  real local_max_abs_flux = 0;
+  real local_sum_abs_vflux = 0;
+  real local_max_abs_vflux = 0;
+  real local_max_abs_uY = 0;
+  real local_max_abs_vY = 0;
+
+  for (unsigned long long linear = tid; linear < total_points; linear += stride) {
+    const int k = kl + static_cast<int>(linear / plane_size);
+    const auto rem = linear % plane_size;
+    const int j = jl + static_cast<int>(rem / nx);
+    const int i = il + static_cast<int>(rem % nx);
+
+    const real u_mean = zone->stat_favre_1st(i, j, 0, 0);
+    const real v_mean = zone->stat_favre_1st(i, j, 0, 1);
+    const real y_mean = zone->stat_favre_1st(i, j, 0, 4 + h2_species_index);
+    const real u_rms = sqrt(fmax(zone->stat_favre_2nd(i, j, 0, 0), 0.0));
+    const real y_rms = sqrt(
+      fmax(zone->stat_favre_2nd(i, j, 0, param->statFavre2ScalarVarOffset + h2_species_index), 0.0));
+    const real abs_uY = fabs(zone->stat_favre_2nd(i, j, 0, param->statFavre2ScalarFluxUOffset + h2_species_index));
+    const real abs_vY = fabs(zone->stat_favre_2nd(i, j, 0, param->statFavre2ScalarFluxVOffset + h2_species_index));
+    local_max_abs_uY = fmax(local_max_abs_uY, abs_uY);
+    local_max_abs_vY = fmax(local_max_abs_vY, abs_vY);
+
+    const real up = zone->bv(i, j, k, 1) - u_mean;
+    const real vp = zone->bv(i, j, k, 2) - v_mean;
+    const real yp = zone->sv(i, j, k, h2_species_index) - y_mean;
+    const real abs_flux = fabs(up * yp);
+    const real abs_vflux = fabs(vp * yp);
+    local_sum_abs_flux += abs_flux;
+    local_sum_abs_vflux += abs_vflux;
+    local_max_abs_flux = fmax(local_max_abs_flux, abs_flux);
+    local_max_abs_vflux = fmax(local_max_abs_vflux, abs_vflux);
+    ++local_point_count;
+
+    if (abs_flux <= burst_H * u_rms * y_rms) {
+      continue;
+    }
+    if (const int quadrant = classify_quadrant(up, vp, yp); quadrant > 0) {
+      ++local_quadrant_counts[quadrant - 1];
+    }
+  }
+
+  if (local_point_count > 0) {
+    atomicAdd(point_count, local_point_count);
+    atomicAdd(&metrics[burst_sum_abs_flux], local_sum_abs_flux);
+    atomicAdd(&metrics[burst_sum_abs_vflux], local_sum_abs_vflux);
+    atomic_max_positive_real(&metrics[burst_max_abs_flux], local_max_abs_flux);
+    atomic_max_positive_real(&metrics[burst_max_abs_vflux], local_max_abs_vflux);
+    atomic_max_positive_real(&metrics[burst_max_abs_uY], local_max_abs_uY);
+    atomic_max_positive_real(&metrics[burst_max_abs_vY], local_max_abs_vY);
+  }
+  for (int q = 0; q < 8; ++q) {
+    if (local_quadrant_counts[q] > 0) {
+      atomicAdd(&quadrant_counts[q], local_quadrant_counts[q]);
+    }
+  }
+}
+} // namespace
+
 Monitor::Monitor(Parameter &parameter, const Species &species, const Mesh &mesh_) :
-  block_monitor{parameter, mesh_}, output_file{parameter.get_int("output_file")},
-  n_block{parameter.get_int("n_block")}, n_point(n_block, 0), mesh(mesh_) {
+  output_file{parameter.get_int("output_file")}, n_block{parameter.get_int("n_block")}, n_point(n_block, 0),
+  mesh(mesh_) {
+  block_monitor.initialize(parameter, mesh_);
+  block_monitor.configure_burst(parameter, species);
+
   if (!parameter.get_int("if_monitor_points")) {
     return;
   }
@@ -117,6 +267,7 @@ Monitor::Monitor(const Parameter &parameter, const Mesh &mesh_) :
 
 void Monitor::initialize(Parameter &parameter, const Species &species) {
   block_monitor.initialize(parameter, mesh);
+  block_monitor.configure_burst(parameter, species);
   if (!parameter.get_int("if_monitor_points")) {
     return;
   }
@@ -351,8 +502,16 @@ void Monitor::output_point_monitors() {
   counter_step = 0;
 }
 
-void Monitor::output_block_monitors(const Parameter &parameter, const std::vector<Field> &field, real t,
-  int step) const {
+bool Monitor::need_block_monitor_service(int step) const {
+  return block_monitor.need_service(step);
+}
+
+bool Monitor::evaluate_block_burst(
+  const Parameter &parameter, std::vector<Field> &field, real t, int step, int stat_count, DParameter *param) {
+  return block_monitor.evaluate_burst(parameter, field, t, step, stat_count, param);
+}
+
+void Monitor::output_block_monitors(const Parameter &parameter, std::vector<Field> &field, real t, int step) {
   block_monitor.output_data(parameter, field, t, step);
 }
 
@@ -409,27 +568,26 @@ void BlockMonitor::initialize(Parameter &parameter, const Mesh &mesh_) {
   std::ifstream monitor_file{monitor_file_name};
   std::string line;
   gxl::getline(monitor_file, line); // The comment line
-  std::istringstream line_stream;
   int counter{0};
-  while (gxl::getline_to_stream(monitor_file, line, line_stream)) {
-    // If the line is empty, continue
-    if (line.empty()) {
+  while (gxl::getline(monitor_file, line)) {
+    MonitorBlockRecord record{};
+    if (!parse_monitor_block_record(line, monitor_block_frequency, record)) {
       continue;
     }
-    int pid;
-    line_stream >> pid;
-    if (myid != pid) {
+    if (myid != record.pid) {
       continue;
     }
-    int b, il, ir, jl, jr, kl, kr, freq;
-    line_stream >> b >> il >> ir >> jl >> jr >> kl >> kr;
-    // If there is another integer, it is the frequency
-    if (line_stream >> freq) {
-      frequency.push_back(freq);
-    } else {
-      frequency.push_back(monitor_block_frequency);
+    frequency.push_back(record.frequency);
+    group_range.emplace_back(
+      std::array<int, 7>{record.block_id, record.il, record.ir, record.jl, record.jr, record.kl, record.kr});
+    burst_block_flag.push_back(record.if_burst);
+    if (record.if_burst != 0) {
+      burst_block_indices.push_back(n_block_mon);
+      if (std::find(burst_unique_block_ids.begin(), burst_unique_block_ids.end(), record.block_id) ==
+          burst_unique_block_ids.end()) {
+        burst_unique_block_ids.push_back(record.block_id);
+      }
     }
-    group_range.emplace_back(std::array<int, 7>{b, il, ir, jl, jr, kl, kr});
     ++n_block_mon;
     ++counter;
   }
@@ -443,6 +601,11 @@ void BlockMonitor::initialize(Parameter &parameter, const Mesh &mesh_) {
     }
     parameter.update_parameter("monitor_block_frequency", nFreq);
   }
+  burst_state = {};
+  burst_output_step = -1;
+  burst_started_this_step = false;
+  burst_output_quadrant_tag.clear();
+  last_global_quadrant_counts.fill(0);
 
   const std::filesystem::path out_dir("output/monitor");
   if (exists(out_dir)) {
@@ -487,30 +650,28 @@ void BlockMonitor::initialize(Parameter &parameter, const Mesh &mesh_) {
       }
       info_file << "\nTotal number of variables monitored: " << n_var << "\n";
       info_file << "Total number of block monitors: " << n_block_mon << "\n";
+      info_file << "Total number of burst-enabled block monitors on this process: " << burst_block_indices.size() <<
+          "\n";
       // Print the block monitor ranges
       info_file << "Block monitor ranges:\n";
-      info_file << "\tBlockID\tIL\tIR\tJL\tJR\tKL\tKR\tFrequency\n";
+      info_file << "\tpid\tBlockID\tIL\tIR\tJL\tJR\tKL\tKR\tFrequency\tIfBurst\n";
       monitor_file.open(monitor_file_name);
       // print all the lines except the comment line, including the ones for other processes
       gxl::getline(monitor_file, line); // The comment line
-      while (gxl::getline_to_stream(monitor_file, line, line_stream)) {
-        int pid;
-        line_stream >> pid;
-        int b, il, ir, jl, jr, kl, kr, freq;
-        line_stream >> b >> il >> ir >> jl >> jr >> kl >> kr;
-        info_file << "\t" << b << "\t" << il << "\t" << ir << "\t" << jl << "\t" << jr << "\t" << kl << "\t" << kr;
-        // If there is another integer, it is the frequency
-        if (line_stream >> freq) {
-          info_file << "\t" << freq << "\n";
-        } else {
-          info_file << "\t" << monitor_block_frequency << "\n";
+      while (gxl::getline(monitor_file, line)) {
+        MonitorBlockRecord record{};
+        if (!parse_monitor_block_record(line, monitor_block_frequency, record)) {
+          continue;
         }
+        info_file << "\t" << record.pid << '\t' << record.block_id << "\t" << record.il << "\t" << record.ir <<
+            "\t" << record.jl << "\t" << record.jr << "\t" << record.kl << "\t" << record.kr << "\t" <<
+            record.frequency << "\t" << record.if_burst << "\n";
       }
       // Open the file output/message/reference_state.txt, copy all the content to info_file
       std::ifstream ref_file("output/message/reference_state.txt");
       if (ref_file.is_open()) {
         info_file << "\nReference state information:\n\t";
-        while (gxl::getline_to_stream(ref_file, line, line_stream)) {
+        while (gxl::getline(ref_file, line)) {
           info_file << line << "\n\t";
         }
         ref_file.close();
@@ -579,27 +740,26 @@ BlockMonitor::BlockMonitor(Parameter &parameter, const Mesh &mesh_) {
   std::ifstream monitor_file{monitor_file_name};
   std::string line;
   gxl::getline(monitor_file, line); // The comment line
-  std::istringstream line_stream;
   int counter{0};
-  while (gxl::getline_to_stream(monitor_file, line, line_stream)) {
-    // If the line is empty, continue
-    if (line.empty()) {
+  while (gxl::getline(monitor_file, line)) {
+    MonitorBlockRecord record{};
+    if (!parse_monitor_block_record(line, monitor_block_frequency, record)) {
       continue;
     }
-    int pid;
-    line_stream >> pid;
-    if (myid != pid) {
+    if (myid != record.pid) {
       continue;
     }
-    int b, il, ir, jl, jr, kl, kr, freq;
-    line_stream >> b >> il >> ir >> jl >> jr >> kl >> kr;
-    // If there is another integer, it is the frequency
-    if (line_stream >> freq) {
-      frequency.push_back(freq);
-    } else {
-      frequency.push_back(monitor_block_frequency);
+    frequency.push_back(record.frequency);
+    group_range.emplace_back(
+      std::array<int, 7>{record.block_id, record.il, record.ir, record.jl, record.jr, record.kl, record.kr});
+    burst_block_flag.push_back(record.if_burst);
+    if (record.if_burst != 0) {
+      burst_block_indices.push_back(n_block_mon);
+      if (std::find(burst_unique_block_ids.begin(), burst_unique_block_ids.end(), record.block_id) ==
+          burst_unique_block_ids.end()) {
+        burst_unique_block_ids.push_back(record.block_id);
+      }
     }
-    group_range.emplace_back(std::array<int, 7>{b, il, ir, jl, jr, kl, kr});
     ++n_block_mon;
     ++counter;
   }
@@ -613,6 +773,11 @@ BlockMonitor::BlockMonitor(Parameter &parameter, const Mesh &mesh_) {
     }
     parameter.update_parameter("monitor_block_frequency", nFreq);
   }
+  burst_state = {};
+  burst_output_step = -1;
+  burst_started_this_step = false;
+  burst_output_quadrant_tag.clear();
+  last_global_quadrant_counts.fill(0);
 
   const std::filesystem::path out_dir("output/monitor");
   if (exists(out_dir)) {
@@ -657,30 +822,28 @@ BlockMonitor::BlockMonitor(Parameter &parameter, const Mesh &mesh_) {
       }
       info_file << "\nTotal number of variables monitored: " << n_var << "\n";
       info_file << "Total number of block monitors: " << n_block_mon << "\n";
+      info_file << "Total number of burst-enabled block monitors on this process: " << burst_block_indices.size() <<
+          "\n";
       // Print the block monitor ranges
       info_file << "Block monitor ranges:\n";
-      info_file << "\tBlockID\tIL\tIR\tJL\tJR\tKL\tKR\tFrequency\n";
+      info_file << "\tpid\tBlockID\tIL\tIR\tJL\tJR\tKL\tKR\tFrequency\tIfBurst\n";
       monitor_file.open(monitor_file_name);
       // print all the lines except the comment line, including the ones for other processes
       gxl::getline(monitor_file, line); // The comment line
-      while (gxl::getline_to_stream(monitor_file, line, line_stream)) {
-        int pid;
-        line_stream >> pid;
-        int b, il, ir, jl, jr, kl, kr, freq;
-        line_stream >> b >> il >> ir >> jl >> jr >> kl >> kr;
-        info_file << "\t" << b << "\t" << il << "\t" << ir << "\t" << jl << "\t" << jr << "\t" << kl << "\t" << kr;
-        // If there is another integer, it is the frequency
-        if (line_stream >> freq) {
-          info_file << "\t" << freq << "\n";
-        } else {
-          info_file << "\t" << monitor_block_frequency << "\n";
+      while (gxl::getline(monitor_file, line)) {
+        MonitorBlockRecord record{};
+        if (!parse_monitor_block_record(line, monitor_block_frequency, record)) {
+          continue;
         }
+        info_file << "\t" << record.pid << '\t' << record.block_id << "\t" << record.il << "\t" << record.ir <<
+            "\t" << record.jl << "\t" << record.jr << "\t" << record.kl << "\t" << record.kr << "\t" <<
+            record.frequency << "\t" << record.if_burst << "\n";
       }
       // Open the file output/message/reference_state.txt, copy all the content to info_file
       std::ifstream ref_file("output/message/reference_state.txt");
       if (ref_file.is_open()) {
         info_file << "\nReference state information:\n\t";
-        while (gxl::getline_to_stream(ref_file, line, line_stream)) {
+        while (gxl::getline(ref_file, line)) {
           info_file << line << "\n\t";
         }
         ref_file.close();
@@ -726,57 +889,423 @@ BlockMonitor::BlockMonitor(Parameter &parameter, const Mesh &mesh_) {
   MPI_Barrier(MPI_COMM_WORLD);
 }
 
-void BlockMonitor::output_data(const Parameter &parameter, const std::vector<Field> &field, real t, int step) const {
-  if (n_block_mon <= 0)
-    return;
+void BlockMonitor::configure_burst(const Parameter &parameter, const Species &species) {
+  burst_enabled = parameter.get_bool("if_monitor_block_burst");
+  burst_quadrants = parameter.get_int_array("monitor_block_burst_quadrants");
+  burst_frequency = parameter.get_int("monitor_block_burst_frequency");
+  burst_check_frequency = parameter.get_int("monitor_block_burst_check_frequency");
+  if (burst_check_frequency <= 0) {
+    burst_check_frequency = parameter.get_int("monitor_block_frequency");
+  }
+  burst_duration = parameter.get_int("monitor_block_burst_duration");
+  burst_cooldown = parameter.get_int("monitor_block_burst_cooldown");
+  burst_min_count = parameter.get_int("monitor_block_burst_min_count");
+  burst_H = parameter.get_real("monitor_block_burst_H");
+  burst_use_abs_flux = parameter.get_bool("monitor_block_burst_use_abs_flux");
+  fav2_scalar_var_offset = parameter.has_int("stat_favre2_scalar_var_offset")
+                           ? parameter.get_int("stat_favre2_scalar_var_offset")
+                           : 7;
+  if (parameter.has_int("stat_favre2_scalar_flux_u_offset") && parameter.has_int("stat_favre2_scalar_flux_v_offset")) {
+    fav2_scalar_flux_u_offset = parameter.get_int("stat_favre2_scalar_flux_u_offset");
+    fav2_scalar_flux_v_offset = parameter.get_int("stat_favre2_scalar_flux_v_offset");
+  } else {
+    const int n_spec = parameter.get_int("n_spec");
+    const int scalar_var_count = (parameter.get_bool("if_collect_spec_favreAvg") ? n_spec : 0) + parameter.
+                                 get_int("n_ps");
+    fav2_scalar_flux_u_offset = fav2_scalar_var_offset + scalar_var_count;
+    fav2_scalar_flux_v_offset = fav2_scalar_flux_u_offset +
+                                (parameter.get_bool("if_collect_scalar_flux") ? n_spec : 0);
+  }
 
-  const std::filesystem::path out_dir("output/monitor");
-  const int myid{parameter.get_int("myid")};
+  if (!burst_enabled) {
+    return;
+  }
+  if (!parameter.get_int("if_monitor_blocks")) {
+    printf("Error: if_monitor_block_burst requires if_monitor_blocks = 1.\n");
+    MpiParallel::exit();
+  }
+  if (!parameter.get_bool("if_collect_statistics")) {
+    printf("Error: if_monitor_block_burst requires if_collect_statistics = 1.\n");
+    MpiParallel::exit();
+  }
+  if (!parameter.get_bool("perform_spanwise_average")) {
+    printf("Error: if_monitor_block_burst requires perform_spanwise_average = 1.\n");
+    MpiParallel::exit();
+  }
+  if (!parameter.get_bool("if_collect_spec_favreAvg")) {
+    printf("Error: if_monitor_block_burst requires if_collect_spec_favreAvg = 1.\n");
+    MpiParallel::exit();
+  }
+  if (!parameter.get_bool("if_collect_2nd_moments")) {
+    printf("Error: if_monitor_block_burst requires if_collect_2nd_moments = 1.\n");
+    MpiParallel::exit();
+  }
+  if (!parameter.get_bool("if_collect_scalar_flux")) {
+    printf("Error: if_monitor_block_burst requires if_collect_scalar_flux = 1.\n");
+    MpiParallel::exit();
+  }
+  if (burst_frequency <= 0 || burst_check_frequency <= 0) {
+    printf("Error: burst monitor frequencies must be positive.\n");
+    MpiParallel::exit();
+  }
+  if (burst_duration < 0 || burst_cooldown < 0 || burst_min_count <= 0) {
+    printf("Error: burst monitor duration/cooldown/min_count is invalid.\n");
+    MpiParallel::exit();
+  }
+  if (burst_quadrants.empty()) {
+    printf("Error: monitor_block_burst_quadrants cannot be empty.\n");
+    MpiParallel::exit();
+  }
+  for (const int quadrant: burst_quadrants) {
+    if (quadrant < 1 || quadrant > 8) {
+      printf("Error: burst quadrant %d is invalid. Expect values in [1, 8].\n", quadrant);
+      MpiParallel::exit();
+    }
+  }
+
+  h2_species_index = -1;
+  for (const auto &[name, index]: species.spec_list) {
+    if (gxl::to_upper(name) == "H2") {
+      h2_species_index = index;
+      break;
+    }
+  }
+  if (h2_species_index < 0) {
+    printf("Error: if_monitor_block_burst requires H2 in the species list.\n");
+    MpiParallel::exit();
+  }
+
+  const int local_burst_block_count = static_cast<int>(burst_block_indices.size());
+  MPI_Allreduce(&local_burst_block_count, &global_burst_block_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  if (global_burst_block_count <= 0) {
+    printf("Error: if_monitor_block_burst requires at least one monitor block with if_burst = 1 across all ranks.\n");
+    MpiParallel::exit();
+  }
+
+  if (d_burst_quadrant_counts == nullptr) {
+    cudaMalloc(&d_burst_quadrant_counts, 8 * sizeof(int));
+  }
+  if (d_burst_point_count == nullptr) {
+    cudaMalloc(&d_burst_point_count, sizeof(unsigned long long));
+  }
+  if (d_burst_metrics == nullptr) {
+    cudaMalloc(&d_burst_metrics, burst_metric_count * sizeof(real));
+  }
+
+  if (parameter.get_int("myid") == 0) {
+    std::ofstream info_file("output/monitor/info.txt", std::ios::app);
+    if (info_file.is_open()) {
+      info_file << "\nBurst block monitor settings:\n";
+      info_file << "\tEnabled\t1\n";
+      info_file << "\tGlobalBurstBlockCount\t" << global_burst_block_count << "\n";
+      info_file << "\tCheckFrequency\t" << burst_check_frequency << "\n";
+      info_file << "\tBurstFrequency\t" << burst_frequency << "\n";
+      info_file << "\tDuration\t" << burst_duration << "\n";
+      info_file << "\tCooldown\t" << burst_cooldown << "\n";
+      info_file << "\tH\t" << burst_H << "\n";
+      info_file << "\tMinCount\t" << burst_min_count << "\n";
+      info_file << "\tQuadrants\t";
+      for (size_t i = 0; i < burst_quadrants.size(); ++i) {
+        if (i > 0) info_file << ',';
+        info_file << burst_quadrants[i];
+      }
+      info_file << "\n";
+    }
+  }
+}
+
+bool BlockMonitor::need_regular_output(int blk, int step) const {
+  return step % frequency[blk] == 0;
+}
+
+bool BlockMonitor::need_trigger_check(int step) const {
+  if (!burst_enabled) {
+    return false;
+  }
+  if (burst_state.active || step < burst_state.cooldown_end_step) {
+    return false;
+  }
+  return step % burst_check_frequency == 0;
+}
+
+bool BlockMonitor::need_service(int step) const {
+  bool need_local_regular_output = false;
   for (int blk = 0; blk < n_block_mon; ++blk) {
-    if (step % frequency[blk] != 0) {
+    if (need_regular_output(blk, step)) {
+      need_local_regular_output = true;
+      break;
+    }
+  }
+  if (!burst_enabled) {
+    return need_local_regular_output;
+  }
+  if (burst_state.active) {
+    const int next_state_step = burst_state.next_output_step >= 0
+                                ? std::min(burst_state.next_output_step, burst_state.end_step)
+                                : burst_state.end_step;
+    return need_local_regular_output || step >= next_state_step;
+  }
+  return need_local_regular_output || need_trigger_check(step);
+}
+
+const char *BlockMonitor::quadrant_name(int quadrant) {
+  switch (quadrant) {
+    case 1: return "O1";
+    case 2: return "O2";
+    case 3: return "O3";
+    case 4: return "O4";
+    case 5: return "O5";
+    case 6: return "O6";
+    case 7: return "O7";
+    case 8: return "O8";
+    default: return "O0";
+  }
+}
+
+bool BlockMonitor::is_target_quadrant(int quadrant, real up, real vp, real yp) {
+  switch (quadrant) {
+    case 1: return up > 0 && vp > 0 && yp > 0;
+    case 2: return up < 0 && vp > 0 && yp > 0;
+    case 3: return up < 0 && vp > 0 && yp < 0;
+    case 4: return up > 0 && vp > 0 && yp < 0;
+    case 5: return up > 0 && vp < 0 && yp > 0;
+    case 6: return up < 0 && vp < 0 && yp > 0;
+    case 7: return up < 0 && vp < 0 && yp < 0;
+    case 8: return up > 0 && vp < 0 && yp < 0;
+    default: return false;
+  }
+}
+
+BlockBurstTriggerResult BlockMonitor::check_local_burst_trigger(const Parameter &parameter, std::vector<Field> &field,
+  int stat_count, DParameter *param) const {
+  BlockBurstTriggerResult result{};
+  if (!burst_enabled || h2_species_index < 0 || param == nullptr || stat_count <= 0 || burst_block_indices.empty()) {
+    return result;
+  }
+
+  dim3 stat_tpb{8, 8, 4};
+  for (const int bid: burst_unique_block_ids) {
+    const auto mx = field[bid].block.mx;
+    const auto my = field[bid].block.my;
+    if (field[bid].block.mz == 1) {
+      stat_tpb = {16, 16, 1};
+    } else {
+      stat_tpb = {8, 8, 4};
+    }
+    const dim3 stat_bpg{((mx - 1) / stat_tpb.x + 1), ((my - 1) / stat_tpb.y + 1), 1};
+    compute_statistical_data_spanwise_average<<<stat_bpg, stat_tpb>>>(field[bid].d_ptr, param, stat_count);
+  }
+
+  cudaMemset(d_burst_quadrant_counts, 0, 8 * sizeof(int));
+  cudaMemset(d_burst_point_count, 0, sizeof(unsigned long long));
+  cudaMemset(d_burst_metrics, 0, burst_metric_count * sizeof(real));
+
+  constexpr int tpb = 256;
+  for (const int blk: burst_block_indices) {
+    const auto &range = group_range[blk];
+    const int nx = range[2] - range[1] + 1;
+    const int ny = range[4] - range[3] + 1;
+    const int nz = range[6] - range[5] + 1;
+    const auto n_point = static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny) *
+                         static_cast<unsigned long long>(nz);
+    if (n_point == 0) {
       continue;
     }
+    const int bpg = static_cast<int>(std::min<unsigned long long>((n_point + tpb - 1) / tpb, 1024));
+    accumulate_burst_trigger_for_block<<<bpg, tpb>>>(
+      field[range[0]].d_ptr, param, range[1], range[2], range[3], range[4], range[5], range[6], h2_species_index,
+      burst_H, d_burst_quadrant_counts, d_burst_point_count, d_burst_metrics);
+  }
 
-    const auto bid = group_range[blk][0];
-    const auto &f = field[bid];
+  std::array<real, burst_metric_count> host_metrics{};
+  cudaMemcpy(result.quadrant_counts.data(), d_burst_quadrant_counts, 8 * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&result.point_count, d_burst_point_count, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  cudaMemcpy(host_metrics.data(), d_burst_metrics, burst_metric_count * sizeof(real), cudaMemcpyDeviceToHost);
+  result.sum_abs_flux = host_metrics[burst_sum_abs_flux];
+  result.max_abs_flux = host_metrics[burst_max_abs_flux];
+  result.sum_abs_vflux = host_metrics[burst_sum_abs_vflux];
+  result.max_abs_vflux = host_metrics[burst_max_abs_vflux];
+  result.max_abs_uY = host_metrics[burst_max_abs_uY];
+  result.max_abs_vY = host_metrics[burst_max_abs_vY];
+  return result;
+}
 
-    const int il{group_range[blk][1]}, ir{group_range[blk][2]};
+void BlockMonitor::write_block_snapshot(const Parameter &parameter, const Field &f, int blk, real t, int step,
+  bool is_burst, int burst_id, const std::string &quadrant_tag) const {
+  const std::filesystem::path out_dir("output/monitor");
+  const int myid{parameter.get_int("myid")};
+  const auto bid = group_range[blk][0];
+  const auto &range = group_range[blk];
 
-    MPI_File fp;
-    char file_name[1024];
-    sprintf(file_name, "%s/P%dB%dIL%dIR%dJL%dJR%dKL%dKR%d-data.bin", out_dir.string().c_str(), myid, bid, il, ir,
-            group_range[blk][3], group_range[blk][4], group_range[blk][5], group_range[blk][6]);
-    // check the size of the file, if it is larger than 10GB, rename it with the current date and time
-    if (std::filesystem::exists(file_name)) {
-      constexpr unsigned long long maxFileSize = 4ull * 1024ull * 1024ull * 1024ull; // 4GB
-      if (std::filesystem::file_size(file_name) > maxFileSize) {
-        // The date should be in format YYYYMMDD_HHMMSS, and it should be in front of '.bin'
-        // Get the current time
-        auto now_c = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        const std::tm *tm = std::localtime(&now_c);
-        char buffer[64];
-        std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", tm);
+  char file_name[1024];
+  if (is_burst) {
+    sprintf(file_name,
+            "%s/P%dB%dIL%dIR%dJL%dJR%dKL%dKR%d-burst%s-B%06d-step%010d-data.bin",
+            out_dir.string().c_str(), myid, bid, range[1], range[2], range[3], range[4], range[5], range[6],
+            quadrant_tag.empty() ? "O0" : quadrant_tag.c_str(), burst_id, step);
+  } else {
+    sprintf(file_name, "%s/P%dB%dIL%dIR%dJL%dJR%dKL%dKR%d-data.bin", out_dir.string().c_str(), myid, bid, range[1],
+            range[2], range[3], range[4], range[5], range[6]);
+  }
 
-        std::string new_file_name = file_name;
-        new_file_name += "_" + std::string(buffer);
-        std::filesystem::rename(file_name, new_file_name);
+  const auto now_tp = std::chrono::system_clock::now();
+  auto now_c = std::chrono::system_clock::to_time_t(now_tp);
+  const std::tm *tm = std::localtime(&now_c);
+  char buffer[64];
+  std::strftime(buffer, sizeof(buffer), "%Y%m%d_%H%M%S", tm);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp.time_since_epoch()) % 1000;
+  char msbuf[8];
+  std::snprintf(msbuf, sizeof(msbuf), "_%03d", static_cast<int>(ms.count()));
+  std::string new_file_name = std::string(file_name) + "_" + std::string(buffer) + std::string(msbuf);
+  if (std::filesystem::exists(file_name)) {
+    std::filesystem::rename(file_name, new_file_name);
+  }
+
+  MPI_File fp;
+  MPI_File_open(MPI_COMM_SELF, new_file_name.c_str(), MPI_MODE_CREATE | MPI_MODE_WRONLY | MPI_MODE_APPEND,
+                MPI_INFO_NULL, &fp);
+  MPI_Status status;
+  MPI_File_write(fp, &t, 1, MPI_DOUBLE, &status);
+  const auto &ty1 = ty[blk];
+  for (int l = 0; l < n_bv; ++l) {
+    MPI_File_write(fp, f.bv[bv_label[l]], 1, ty1, &status);
+  }
+  for (int l = 0; l < n_sv; ++l) {
+    MPI_File_write(fp, f.sv[sv_label[l]], 1, ty1, &status);
+  }
+  for (int l = 0; l < n_ov; ++l) {
+    MPI_File_write(fp, f.ov[ov_label[l]], 1, ty1, &status);
+  }
+  MPI_File_close(&fp);
+}
+
+bool BlockMonitor::evaluate_burst(const Parameter &parameter, std::vector<Field> &field, real t, int step,
+  int stat_count, DParameter *param) {
+  bool need_local_output = false;
+  burst_output_step = -1;
+  burst_started_this_step = false;
+  burst_output_quadrant_tag.clear();
+  last_global_quadrant_counts.fill(0);
+
+  for (int blk = 0; blk < n_block_mon; ++blk) {
+    if (need_regular_output(blk, step)) {
+      need_local_output = true;
+      break;
+    }
+  }
+  if (!burst_enabled) {
+    return need_local_output;
+  }
+
+  bool just_deactivated = false;
+  if (burst_state.active && step >= burst_state.end_step) {
+    burst_state.active = false;
+    burst_state.cooldown_end_step = step + burst_cooldown;
+    just_deactivated = true;
+  }
+  if (burst_state.active) {
+    if (step >= burst_state.next_output_step && step < burst_state.end_step) {
+      burst_output_step = step;
+      burst_output_quadrant_tag = burst_state.last_trigger_quadrant_tag;
+      burst_state.next_output_step += burst_frequency;
+      if (!burst_block_indices.empty()) {
+        need_local_output = true;
       }
     }
+    return need_local_output;
+  }
+  if (just_deactivated || !need_trigger_check(step)) {
+    return need_local_output;
+  }
 
-    MPI_File_open(MPI_COMM_SELF, file_name, MPI_MODE_CREATE | MPI_MODE_WRONLY | MPI_MODE_APPEND, MPI_INFO_NULL, &fp);
-    MPI_Status status;
-    MPI_File_write(fp, &t, 1, MPI_DOUBLE, &status);
-    const auto &ty1 = ty[blk];
-    for (int l = 0; l < n_bv; ++l) {
-      MPI_File_write(fp, f.bv[bv_label[l]], 1, ty1, &status);
+  const auto local_trigger = check_local_burst_trigger(parameter, field, stat_count, param);
+  std::array<int, 8> global_quadrant_counts{};
+  std::array<real, 2> local_sum_metrics{local_trigger.sum_abs_flux, local_trigger.sum_abs_vflux};
+  std::array<real, 2> global_sum_metrics{};
+  std::array<real, 4> local_max_metrics{
+    local_trigger.max_abs_flux, local_trigger.max_abs_vflux, local_trigger.max_abs_uY, local_trigger.max_abs_vY
+  };
+  std::array<real, 4> global_max_metrics{};
+  unsigned long long global_point_count = 0;
+
+  MPI_Allreduce(local_trigger.quadrant_counts.data(), global_quadrant_counts.data(), 8, MPI_INT, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(&local_trigger.point_count, &global_point_count, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(local_sum_metrics.data(), global_sum_metrics.data(), 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(local_max_metrics.data(), global_max_metrics.data(), 4, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
+  last_global_quadrant_counts = global_quadrant_counts;
+  burst_state.last_global_strong_count = 0;
+  std::string quadrant_tag;
+  for (const int quadrant: burst_quadrants) {
+    if (global_quadrant_counts[quadrant - 1] >= burst_min_count) {
+      if (!quadrant_tag.empty()) {
+        quadrant_tag += '-';
+      }
+      quadrant_tag += quadrant_name(quadrant);
+      burst_state.last_global_strong_count = std::max(
+        burst_state.last_global_strong_count, global_quadrant_counts[quadrant - 1]);
     }
-    for (int l = 0; l < n_sv; ++l) {
-      MPI_File_write(fp, f.sv[sv_label[l]], 1, ty1, &status);
+  }
+  if (quadrant_tag.empty()) {
+    return need_local_output;
+  }
+
+  burst_state.active = true;
+  burst_state.end_step = step + burst_duration;
+  burst_state.cooldown_end_step = -1;
+  burst_state.next_output_step = step + burst_frequency;
+  burst_state.burst_id += 1;
+  burst_state.last_trigger_quadrant_tag = quadrant_tag;
+  burst_state.last_max_abs_uY = global_max_metrics[2];
+  burst_state.last_max_abs_vY = global_max_metrics[3];
+  burst_output_step = step;
+  burst_started_this_step = true;
+  burst_output_quadrant_tag = quadrant_tag;
+  if (!burst_block_indices.empty()) {
+    need_local_output = true;
+  }
+
+  if (parameter.get_int("myid") == 0) {
+    std::ostringstream msg;
+    msg << "=== BURST START === step=" << step << " time=" << t << " burst_id=" << burst_state.burst_id
+        << " quadrants=" << quadrant_tag;
+    for (const int quadrant: burst_quadrants) {
+      if (global_quadrant_counts[quadrant - 1] >= burst_min_count) {
+        msg << " global_count(" << quadrant_name(quadrant) << ")=" << global_quadrant_counts[quadrant - 1];
+      }
     }
-    for (int l = 0; l < n_ov; ++l) {
-      MPI_File_write(fp, f.ov[ov_label[l]], 1, ty1, &status);
+    printf("%s\n", msg.str().c_str());
+    printf("Global burst diagnostics: max|u''Y_H2''|=%e max|v''Y_H2''|=%e\n", burst_state.last_max_abs_uY,
+           burst_state.last_max_abs_vY);
+    if (burst_use_abs_flux) {
+      const real avg_abs_flux =
+          global_point_count > 0 ? global_sum_metrics[0] / static_cast<real>(global_point_count) : 0.0;
+      const real avg_abs_vflux =
+          global_point_count > 0 ? global_sum_metrics[1] / static_cast<real>(global_point_count) : 0.0;
+      printf(
+        "Global burst flux diagnostics: avg|u''Y_H2''|_inst=%e max|u''Y_H2''|_inst=%e avg|v''Y_H2''|_inst=%e max|v''Y_H2''|_inst=%e\n",
+        avg_abs_flux, global_max_metrics[0], avg_abs_vflux, global_max_metrics[1]);
     }
-    MPI_File_close(&fp);
+  }
+  return need_local_output;
+}
+
+void BlockMonitor::output_data(const Parameter &parameter, std::vector<Field> &field, real t, int step) {
+  if (n_block_mon <= 0) {
+    return;
+  }
+
+  const bool write_burst = burst_enabled && burst_output_step == step && !burst_output_quadrant_tag.empty();
+  for (int blk = 0; blk < n_block_mon; ++blk) {
+    const auto bid = group_range[blk][0];
+    const auto &f = field[bid];
+    if (need_regular_output(blk, step)) {
+      write_block_snapshot(parameter, f, blk, t, step, false, 0, "");
+    }
+    if (write_burst && burst_block_flag[blk] != 0) {
+      write_block_snapshot(parameter, f, blk, t, step, true, burst_state.burst_id, burst_output_quadrant_tag);
+    }
   }
 }
 

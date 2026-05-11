@@ -278,7 +278,7 @@ public:
     }
   }
 
-  __host__ __device__ __forceinline__ int stride_i() {
+  __host__ __device__ __forceinline__ int stride_i() const {
     if constexpr (major == Major::RowMajor) {
       return disp1;
     } else {
@@ -286,11 +286,11 @@ public:
     }
   }
 
-  __host__ __device__ __forceinline__ int stride_j() {
+  __host__ __device__ __forceinline__ int stride_j() const {
     return disp2;
   }
 
-  __host__ __device__ __forceinline__ int stride_k() {
+  __host__ __device__ __forceinline__ int stride_k() const {
     if constexpr (major == Major::RowMajor) {
       return n4;
     } else {

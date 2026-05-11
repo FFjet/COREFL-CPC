@@ -86,7 +86,16 @@ template<MixtureModel mix_model> void IOManager<mix_model>::manage_output(int st
   if (if_monitor_points) {
     monitor.monitor_point(step, physical_time, field);
   }
-  if (if_monitor_blocks && step % monitor_block_frequency == 0) {
+  if (if_collect_statistics && step > collect_statistics_iter_start) {
+    stat_collector.collect_data(param);
+  }
+  const int stat_count = if_collect_statistics && !stat_collector.counter_fav1st.empty() ?
+                         stat_collector.counter_fav1st[0] : 0;
+  const bool need_block_monitor_service = if_monitor_blocks && monitor.need_block_monitor_service(step);
+  const bool need_block_monitor_output = need_block_monitor_service ?
+                                         monitor.evaluate_block_burst(parameter, field, physical_time, step, stat_count,
+                                                                      param) : false;
+  if (need_block_monitor_output) {
     // ReSharper disable CppDFAConstantConditions
     if (!update_copy) {
       // ReSharper restore CppDFAConstantConditions
@@ -96,9 +105,6 @@ template<MixtureModel mix_model> void IOManager<mix_model>::manage_output(int st
       update_copy = true;
     }
     monitor.output_block_monitors(parameter, field, physical_time, step);
-  }
-  if (if_collect_statistics && step > collect_statistics_iter_start) {
-    stat_collector.collect_data(param);
   }
   if (step % output_file == 0 || finished) {
     if (!update_copy) {

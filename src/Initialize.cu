@@ -69,6 +69,20 @@ inline bool read_two_temperature_restart_scalar(Parameter &parameter, std::vecto
     return false;
   }
 }
+
+inline void restore_restart_step(Parameter &parameter, bool restore_step) {
+  if (!restore_step) {
+    parameter.update_parameter("step", 0);
+    return;
+  }
+
+  std::ifstream step_file{"output/message/step.txt"};
+  int step{0};
+  if (step_file) {
+    step_file >> step;
+  }
+  parameter.update_parameter("step", step);
+}
 }
 
 template<MixtureModel mix_model> void initialize_basic_variables(Parameter &parameter, const Mesh &mesh,
@@ -101,9 +115,18 @@ template<MixtureModel mix_model> void initialize_basic_variables(Parameter &para
       break;
     case 1:
       initialize_from_start(parameter, mesh, field, species);
-      read_flowfield<mix_model>(parameter, mesh, field, species);
+      read_flowfield<mix_model>(parameter, mesh, field, species, true);
       break;
-    case 2: // Read a 2D profile, all span-wise layers are initialized with the same profile.
+    case 2:
+      initialize_from_start(parameter, mesh, field, species);
+      read_flowfield<mix_model>(parameter, mesh, field, species, false);
+      if (parameter.get_int("myid") == 0) {
+        std::ofstream history("history.dat", std::ios::trunc);
+        history << "step\tdt(s)\tt(s)\terror_max\n";
+        history.close();
+      }
+      break;
+    case 3: // Read a 2D profile, all span-wise layers are initialized with the same profile.
       read_2D_for_3D<mix_model>(parameter, mesh, field, species);
       break;
     default:
@@ -164,8 +187,38 @@ void initialize_from_start(Parameter &parameter, const Mesh &mesh, std::vector<F
   MPI_Barrier(MPI_COMM_WORLD);
 }
 
+void modify_values(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field, Species &species) {
+  int i_800 = 1e+6;
+  for (int i = 0; i < mesh[0].mx; ++i) {
+    if (mesh[0].x(i, 0, 0) > 800) {
+      i_800 = i;
+      break;
+    }
+  }
+  if (i_800 < 1e+6) {
+    const auto &b = mesh[0];
+    auto &bv = field[0].bv;
+    auto &sv = field[0].sv;
+    for (int k = 0; k < b.mz; ++k) {
+      for (int j = 0; j < b.my; ++j) {
+        for (int i = i_800 + 1; i < b.mx; ++i) {
+          bv(i, j, k, 0) = bv(i_800, j, k, 0);
+          bv(i, j, k, 1) = bv(i_800, j, k, 1);
+          bv(i, j, k, 2) = bv(i_800, j, k, 2);
+          bv(i, j, k, 3) = bv(i_800, j, k, 3);
+          bv(i, j, k, 4) = bv(i_800, j, k, 4);
+          bv(i, j, k, 5) = bv(i_800, j, k, 5);
+          for (int l = 0; l < parameter.get_int("n_scalar"); ++l) {
+            sv(i, j, k, l) = sv(i_800, j, k, l);
+          }
+        }
+      }
+    }
+  }
+}
+
 template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field,
-  Species &species) {
+  Species &species, bool restore_step) {
   const std::filesystem::path out_dir("output");
   if (!exists(out_dir)) {
     printf("The directory to flowfield files does not exist!\n");
@@ -275,7 +328,7 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
     if (same_block) {
       // Read the data in the order of the current mesh
       read_flowfield_with_same_block<mix_model>(parameter, mesh, field, species, blk_order, offset,
-                                                mx, my, mz, n_var_old, index_order, fp, old_data_info);
+                                                mx, my, mz, n_var_old, index_order, fp, old_data_info, restore_step);
     } else {
       // The mesh is different, we need to interpolate the data to the current mesh
     }
@@ -405,14 +458,11 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
     }
     copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
 
-    std::ifstream step_file{"output/message/step.txt"};
-    int step{0};
-    step_file >> step;
-    step_file.close();
-    parameter.update_parameter("step", step);
+    restore_restart_step(parameter, restore_step);
 
     if (parameter.get_int("myid") == 0) {
-      printf("\t->-> %-25s : initialization method.\n", "From previous results");
+      printf("\t->-> %-25s : initialization method.\n",
+             restore_step ? "From previous results" : "From plt file");
     }
   }
 }
@@ -669,7 +719,7 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
 template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &parameter, const Mesh &mesh,
   std::vector<Field> &field, Species &species, const std::vector<int> &blk_order, MPI_Offset offset_data,
   const std::vector<int> &mx, const std::vector<int> &my, const std::vector<int> &mz, int n_var_old,
-  const std::vector<int> &index_order, MPI_File &fp, std::array<int, 2> &old_data_info) {
+  const std::vector<int> &index_order, MPI_File &fp, std::array<int, 2> &old_data_info, bool restore_step) {
   int blk_start = 0;
   const int myid = parameter.get_int("myid");
   for (int i = 0; i < myid; ++i) {
@@ -791,14 +841,11 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
   }
   copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
 
-  std::ifstream step_file{"output/message/step.txt"};
-  int step{0};
-  step_file >> step;
-  step_file.close();
-  parameter.update_parameter("step", step);
+  restore_restart_step(parameter, restore_step);
 
   if (parameter.get_int("myid") == 0) {
-    printf("\t->-> %-25s : initialization method.\n", "From previous results");
+    printf("\t->-> %-25s : initialization method.\n",
+           restore_step ? "From previous results" : "From plt file");
   }
 }
 

@@ -1114,7 +1114,7 @@ VT 源 \(\dot\Theta^{\tr:\ve}\) &
 \code{conductivity\_eq}；随后
 \code{thermal\_conductivity=conductivity\_eq*cp\_tr/cp\_mix\_tr}，
 \code{thermal\_conductivity\_ve=conductivity\_eq*cv\_ve/cp\_mix\_tr}。
-8 阶 collocated 通量在总能量 \texttt{f/g/hFlux(...,4)} 中加入
+8 阶 collocated 与 2 阶 face 通量均在总能量 \texttt{f/g/hFlux(...,4)} 中加入
 \(\kappa_{\ve}\nabla T_{\ve}\)，并在
 \code{f/g/hFlux(...,5+i\_eve)} 写入 \(\rho E_{\ve}\) 粘性通量。\\
 \hline
@@ -1275,11 +1275,11 @@ COREFL 的物种方程残差把存储的粘性通量散度直接加到 \(\dd\QQ/
 \code{cp\_tr} 是减去平衡 VE 热容后的平动--转动部分。
 这与 SU2 文档中将不同能量模态导热分开处理的要求一致。
 
-源码中 8 阶 collocated 粘性通量和 2 阶面通量的数组索引不同：
-\texttt{fFlux/gFlux/hFlux} 按守恒变量索引写入，因此总能量为
-\texttt{(...,4)}，\(\rho E_{\ve}\) 为 \texttt{(...,5+i\_eve)}；
-\texttt{vis\_flux} 只存动量、能量和标量粘性通量，能量为
-\texttt{(...,3)}，第 \(l\) 个标量为 \texttt{(...,4+l)}。
+源码中 8 阶 collocated 粘性通量和 2 阶 face 粘性通量均写入
+\texttt{fFlux/gFlux/hFlux}，并按守恒变量索引对齐；因此总能量为
+\texttt{(...,4)}，第 \(l\) 个物种为 \texttt{(...,5+l)}，
+\(\rho E_{\ve}\) 为 \texttt{(...,5+i\_eve)}，被动标量使用其守恒变量索引
+\texttt{lc}。
 对应代码为
 \[
 \begin{array}{c|c|c}
@@ -1288,8 +1288,8 @@ COREFL 的物种方程残差把存储的粘性通量散度直接加到 \(\dd\QQ/
 & \texttt{f/g/hFlux(...,4)}
 & \code{f/g/hFlux(...,5+i\_eve)}\\
 2\text{ 阶 face}
-& \texttt{vis\_flux(...,3)}
-& \texttt{vis\_flux(...,4+i\_eve)}
+& \texttt{f/g/hFlux(...,4)}
+& \texttt{f/g/hFlux(...,5+i\_eve)}
 \end{array}
 \]
 两条路径都先把 \(\kappa_{\ve}\nabla T_{\ve}\) 加入总能量粘性通量，

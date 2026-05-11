@@ -30,6 +30,7 @@ cfd::DParameter::DParameter(Parameter &parameter, const Species &species, Reacti
     parameter.get_real("rho_inf") * parameter.get_real("v_inf") * parameter.get_real("rho_inf") *
     parameter.get_real("v_inf")
   }, perform_spanwise_average{parameter.get_bool("perform_spanwise_average")},
+  if_wall_stats{parameter.get_bool("if_wall_stats")},
   filter_strength(parameter.get_real("filter_strength"))
 /*,sponge_layer{parameter.get_bool("sponge_layer")}, sponge_function{parameter.get_int("sponge_function")},
 sponge_iter{parameter.get_int("sponge_iter")}, spongeXMinusStart{parameter.get_real("spongeXMinusStart")},
@@ -239,12 +240,16 @@ spongeZPlusEnd{parameter.get_real("spongeZPlusEnd")}*/ {
     cudaMemcpy(reyAveScalarIndex, parameter.get_int_array("reyAveScalarIndex").data(), n_reyAveScalar * sizeof(int),
                cudaMemcpyHostToDevice);
     if_collect_2nd_moments = parameter.get_bool("if_collect_2nd_moments");
+    if_collect_scalar_flux = parameter.get_bool("if_collect_scalar_flux");
     if_collect_spec_favreAvg = parameter.get_bool("if_collect_spec_favreAvg");
     rho_p_correlation = parameter.get_bool("rho_p_correlation");
     stat_tke_budget = parameter.get_bool("stat_tke_budget");
     stat_scalar_fluc_budget = parameter.get_bool("stat_scalar_fluc_budget");
     stat_species_dissipation_rate = parameter.get_bool("stat_species_dissipation_rate");
     stat_species_velocity_correlation = parameter.get_bool("stat_species_velocity_correlation");
+    statFavre2ScalarVarOffset = parameter.get_int("stat_favre2_scalar_var_offset");
+    statFavre2ScalarFluxUOffset = parameter.get_int("stat_favre2_scalar_flux_u_offset");
+    statFavre2ScalarFluxVOffset = parameter.get_int("stat_favre2_scalar_flux_v_offset");
     n_species_stat = parameter.get_int("n_species_stat");
     cudaMalloc(&specStatIndex, n_species_stat * sizeof(int));
     cudaMemcpy(specStatIndex, parameter.get_int_array("species_stat_index").data(), n_species_stat * sizeof(int),
@@ -394,6 +399,9 @@ spongeZPlusEnd{parameter.get_real("spongeZPlusEnd")}*/ {
   for (int l = 0; l < n_scalar; ++l) {
     limit_flow.sv_inf[l] = sv_inf[l];
   }
+
+  x_sponge_start = parameter.get_real("x_sponge_start");
+  y_sponge_start = parameter.get_real("y_sponge_start");
 
   // if (parameter.get_bool("sponge_layer")) {
   //   spongeX = parameter.get_int("spongeX");

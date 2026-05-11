@@ -11,12 +11,14 @@ template<MixtureModel mix_model> void initialize_basic_variables(Parameter &para
 void initialize_from_start(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field, Species &species);
 
 template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field,
-  Species &species);
+  Species &species, bool restore_step = true);
+
+void modify_values(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field, Species &species);
 
 template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &parameter, const Mesh &mesh,
   std::vector<Field> &field, Species &species, const std::vector<int> &blk_order, MPI_Offset offset_data,
   const std::vector<int> &mx, const std::vector<int> &my, const std::vector<int> &mz, int n_var_old,
-  const std::vector<int> &index_order, MPI_File &fp, std::array<int, 2> &old_data_info);
+  const std::vector<int> &index_order, MPI_File &fp, std::array<int, 2> &old_data_info, bool restore_step = true);
 
 template<MixtureModel mix_model> void read_flowfield_by_0Order_interpolation(Parameter &parameter, const Mesh &mesh,
   std::vector<Field> &field, Species &species, const std::vector<int> &blk_order, MPI_Offset offset_data,

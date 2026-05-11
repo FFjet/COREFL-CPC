@@ -847,11 +847,17 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
   } else {
     if_shock = true;
   }
-  // int left_bound = -100, right_bound = -100;
-  // if (i < 3 && zone->bType_il(j, k) != 0)
-  //   left_bound = i;
-  // if (i > zone->mx - 5 && zone->bType_ir(j, k) != 0)
-  //   right_bound = i;
+  bool in_sponge = false;
+  if (zone->x(i, j, k) > param->x_sponge_start || zone->y(i, j, k) > param->y_sponge_start) {
+    if_shock = true;
+    in_sponge = true;
+  }
+
+  int left_bound = -100, right_bound = -100;
+  if (i < 3 && zone->bType_il(j, k) != 0)
+    left_bound = i;
+  if (i > zone->mx - 5 && zone->bType_ir(j, k) != 0)
+    right_bound = i;
 
   extern __shared__ real s[];
 
@@ -952,7 +958,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         eps_here = eps_scaled[2];
       }
 
-      if (param->inviscid_scheme == 71) {
+      if (param->inviscid_scheme == 71 && !in_sponge) {
         real vp[7], vm[7];
         vp[0] = fp[l][i_shared - 3];
         vp[1] = fp[l][i_shared - 2];
@@ -971,7 +977,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
 
         // fc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->mx);
         fc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
-      } else if (param->inviscid_scheme == 51) {
+      } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
         vp[0] = fp[l][i_shared - 2];
         vp[1] = fp[l][i_shared - 1];
@@ -1576,11 +1582,17 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
   } else {
     if_shock = true;
   }
-  // int left_bound = -100, right_bound = -100;
-  // if (j < 3 && zone->bType_jl(i, k) != 0)
-  //   left_bound = j;
-  // if (j > zone->my - 5 && zone->bType_jr(i, k) != 0)
-  //   right_bound = j;
+  bool in_sponge = false;
+  if (zone->x(i, j, k) > param->x_sponge_start || zone->y(i, j, k) > param->y_sponge_start) {
+    if_shock = true;
+    in_sponge = true;
+  }
+
+  int left_bound = -100, right_bound = -100;
+  if (j < 3 && zone->bType_jl(i, k) != 0)
+    left_bound = j;
+  if (j > zone->my - 5 && zone->bType_jr(i, k) != 0)
+    right_bound = j;
 
   extern __shared__ real s[];
 
@@ -1680,7 +1692,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         eps_here = eps_scaled[2];
       }
 
-      if (param->inviscid_scheme == 71) {
+      if (param->inviscid_scheme == 71 && !in_sponge) {
         real vp[7], vm[7];
         vp[0] = fp[l][i_shared - 3][tx];
         vp[1] = fp[l][i_shared - 2][tx];
@@ -1699,7 +1711,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
 
         // gc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->my);
         gc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
-      } else if (param->inviscid_scheme == 51) {
+      } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
         vp[0] = fp[l][i_shared - 2][tx];
         vp[1] = fp[l][i_shared - 1][tx];
@@ -2241,11 +2253,17 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
   } else {
     if_shock = true;
   }
-  // int left_bound = -100, right_bound = -100;
-  // if (k < 3 && zone->bType_kl(i, j) != 0)
-  //   left_bound = k;
-  // if (k > zone->mz - 5 && zone->bType_kr(i, j) != 0)
-  //   right_bound = k;
+  bool in_sponge = false;
+  if (zone->x(i, j, k) > param->x_sponge_start || zone->y(i, j, k) > param->y_sponge_start) {
+    if_shock = true;
+    in_sponge = true;
+  }
+
+  int left_bound = -100, right_bound = -100;
+  if (k < 3 && zone->bType_kl(i, j) != 0)
+    left_bound = k;
+  if (k > zone->mz - 5 && zone->bType_kr(i, j) != 0)
+    right_bound = k;
 
   extern __shared__ real s[];
 
@@ -2345,7 +2363,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         eps_here = eps_scaled[2];
       }
 
-      if (param->inviscid_scheme == 71) {
+      if (param->inviscid_scheme == 71 && !in_sponge) {
         real vp[7], vm[7];
         vp[0] = fp[l][i_shared - 3][tx];
         vp[1] = fp[l][i_shared - 2][tx];
@@ -2364,7 +2382,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
 
         // hc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->mz);
         hc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
-      } else if (param->inviscid_scheme == 51) {
+      } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
         vp[0] = fp[l][i_shared - 2][tx];
         vp[1] = fp[l][i_shared - 1][tx];

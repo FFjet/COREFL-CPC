@@ -334,6 +334,19 @@ void cfd::Parameter::deduce_known_info() {
     update_parameter("chemSrcMethod", 0);
   }
 
+  if (bool_parameters["if_wall_stats"]) {
+    if (!bool_parameters["if_collect_statistics"]) {
+      bool_parameters["if_wall_stats"] = false;
+      // if (int_parameters["myid"] == 0)
+      // printf("if_wall_stats requires if_collect_statistics = 1, we have closed the wall stats.\n");
+      // MPI_Abort(MPI_COMM_WORLD, 1);
+    } else {
+      update_parameter("perform_spanwise_average", true);
+      update_parameter("output_statistics_plt", true);
+      update_parameter("if_collect_2nd_moments", true);
+    }
+  }
+
   update_parameter("n_var", 5);
   update_parameter("n_turb", 0);
   int n_scalar{0};
@@ -404,6 +417,8 @@ void cfd::Parameter::setup_default_settings() {
   int_parameters["shock_sensor"] = 0;
   real_parameters["shockSensor_threshold"] = 0;
   real_parameters["shockSensor_epsilon"] = -1;
+  real_parameters["x_sponge_start"] = 1e+6;
+  real_parameters["y_sponge_start"] = 1e+6;
 
   // For filter indo
   int_parameters["filter_type"] = 0; // No filter by default
@@ -461,6 +476,7 @@ void cfd::Parameter::setup_default_settings() {
   int_parameters["start_collect_statistics_iter"] = 0;
   bool_parameters["perform_spanwise_average"] = false;
   bool_parameters["output_statistics_plt"] = true;
+  bool_parameters["if_wall_stats"] = false;
 
   int_array["post_process"] = {};
   int_array["output_bc"] = {};
@@ -472,6 +488,15 @@ void cfd::Parameter::setup_default_settings() {
   string_parameters["monitor_block_file"] = "input/monitor_blocks.txt";
   int_parameters["monitor_block_frequency"] = 100;
   string_array["monitor_block_var"] = {"u", "v", "w", "pressure"};
+  bool_parameters["if_monitor_block_burst"] = false;
+  int_parameters["monitor_block_burst_frequency"] = 1;
+  int_parameters["monitor_block_burst_check_frequency"] = 0;
+  int_parameters["monitor_block_burst_duration"] = 0;
+  int_parameters["monitor_block_burst_cooldown"] = 0;
+  real_parameters["monitor_block_burst_H"] = 2.0;
+  int_array["monitor_block_burst_quadrants"] = {4, 6};
+  int_parameters["monitor_block_burst_min_count"] = 1;
+  bool_parameters["monitor_block_burst_use_abs_flux"] = false;
 
   int_parameters["n_inflow_fluctuation"] = 0;
   int_array["need_rng"] = {};
@@ -485,6 +510,31 @@ void cfd::Parameter::setup_default_settings() {
 
   bool_parameters["use_df"] = false;
   int_array["df_label"] = {};
+  int_parameters["df_mode"] = 2;                  // 1 - mixing layer; 2 - Touber boundary layer.
+  int_parameters["reynolds_stress_supplier"] = 2; // 2 - Gaussian assumption; 3 - Touber RStress file.
+  real_array["df_reynolds_gaussian_peak"] = {0.01, 0, 0.01, 0, 0, 0.01};
+  string_parameters["df_reynolds_stress_file"] = "input/reynolds_stress.dat";
+  real_parameters["df_y_ref"] = 1.0;
+  real_parameters["df_Re_tau"] = 180;
+  real_parameters["df_velocity_scale"] = -1.0;
+  real_parameters["df_sra_coefficient"] = 1.0;
+  int_parameters["df_diagnostic_interval"] = 0;
+
+  // The following default parameters for the digital filter are from URANOS code.
+  real_parameters["df_y_zone_threshold"] = 0.2;
+  real_parameters["df_y_zone_width"] = 0.03;
+  real_parameters["df_LxU"] = 0.8;
+  real_parameters["df_LxV"] = 0.3;
+  real_parameters["df_LxW"] = 0.3;
+  // real_parameters["df_NfyUi"] = 20;
+  // real_parameters["df_NfyVi"] = 25;
+  // real_parameters["df_NfyWi"] = 15;
+  // real_parameters["df_NfyUo"] = 35;
+  // real_parameters["df_NfyVo"] = 45;
+  // real_parameters["df_NfyWo"] = 20;
+  // real_parameters["df_LxU"] = 10.0;
+  // real_parameters["df_LxV"] = 4.0;
+  // real_parameters["df_LxW"] = 4.0;
 
   bool_parameters["sponge_layer"] = false;
   int_parameters["sponge_function"] = 0; // 0 - (Nektar++, CPC, 2024)
@@ -531,6 +581,8 @@ void cfd::Parameter::setup_default_settings() {
   bool_parameters["stat_scalar_fluc_budget"] = false;
   bool_parameters["stat_species_velocity_correlation"] = false;
   bool_parameters["stat_species_dissipation_rate"] = false;
+  bool_parameters["if_collect_scalar_flux"] = false;
+  bool_parameters["if_wall_stats"] = false;
 
   // info about additional variables
   string_array["available_field_var"] = {};

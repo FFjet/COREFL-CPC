@@ -1,5 +1,6 @@
 #include "SinglePointStat.cuh"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -11,14 +12,114 @@
 #include "stat_lib/TkeBudget.cuh"
 #include "stat_lib/SpeciesStat.cuh"
 #include "DParameter.cuh"
+#include "Parallel.h"
+#include "Constants.h"
+#include "Transport.cuh"
 
 namespace cfd {
+namespace {
+constexpr real wall_stats_eps = 1e-30;
+constexpr real wall_law_kappa = 0.41;
+constexpr real wall_law_B = 5.2;
+constexpr int vdii_integral_steps = 64;
+
+enum WallRecordIndex {
+  WR_X = 0,
+  WR_DELTA99,
+  WR_DELTA_STAR,
+  WR_THETA,
+  WR_H,
+  WR_RE_THETA,
+  WR_RE_TAU,
+  WR_U_E,
+  WR_RHO_E,
+  WR_T_E,
+  WR_P_E,
+  WR_MU_E,
+  WR_MA_E,
+  WR_P_W,
+  WR_RHO_W,
+  WR_T_W,
+  WR_MU_W,
+  WR_TAU_W,
+  WR_Q_W,
+  WR_U_TAU,
+  WR_C_F,
+  WR_C_F_INST,
+  WR_Y_TAU,
+  WR_P_W_RMS,
+  WR_TAU_W_RMS,
+  WR_Q_W_RMS,
+  WR_URMS_PLUS_MAX,
+  WR_YPLUS_URMS_MAX,
+  WR_MINUS_RUV_PLUS_MAX,
+  WR_YPLUS_RUV_MAX,
+  WR_TRMS_TE_MAX,
+  WR_YPLUS_TRMS_MAX,
+  WR_DP_E_DX,
+  WR_BETA,
+  WR_T_AW,
+  WR_ST,
+  WR_2ST_CF,
+  WR_P_W_RMS_TAU,
+  WR_TAU_W_RMS_TAU,
+  WR_Q_W_RMS_TAU,
+  WR_DY1_PLUS,
+  WR_DX_PLUS,
+  WR_DZ_PLUS,
+  WR_C_F_KS,
+  WR_C_F_SM,
+  WR_C_F_CF,
+  WR_COUNT
+};
+
+static_assert(WR_COUNT == WallStats::n_record);
+
+real finite_or_zero(real v) {
+  return std::isfinite(v) ? v : 0;
+}
+
+real wall_y(const Block &block, int i, int j) {
+  return block.y(i, j, 0) - block.y(i, 0, 0);
+}
+
+real interpolate_at_y(real y0, real f0, real y1, real f1, real y) {
+  const real a = (y - y0) / (y1 - y0 + wall_stats_eps);
+  return f0 + a * (f1 - f0);
+}
+
+real derivative_values(const std::vector<real> &v, const std::vector<real> &x, int j) {
+  const int n = static_cast<int>(v.size());
+  if (n < 2) return 0;
+  if (j <= 0) return (v[1] - v[0]) / (x[1] - x[0] + 1e-30);
+  if (j >= n - 1) return (v[n - 1] - v[n - 2]) / (x[n - 1] - x[n - 2] + 1e-30);
+  return (v[j + 1] - v[j - 1]) / (x[j + 1] - x[j - 1] + 1e-30);
+}
+}
+
 SinglePointStat::SinglePointStat(Parameter &_parameter, const Mesh &_mesh, std::vector<Field> &_field,
   const Species &_species) :
   parameter(_parameter), mesh(_mesh), field(_field), species(_species) {
   const bool collect_this_time{_parameter.get_bool("if_collect_statistics")};
   myid = _parameter.get_int("myid");
+  if_wall_stats = parameter.get_bool("if_wall_stats");
+  // if (if_wall_stats) {
+  // if (!collect_this_time) {
+  //   printf("Error: if_wall_stats requires if_collect_statistics = 1.\n");
+  //   MpiParallel::exit();
+  // }
+  // parameter.update_parameter("perform_spanwise_average", true);
+  // parameter.update_parameter("output_statistics_plt", true);
+  // parameter.update_parameter("if_collect_2nd_moments", true);
+  // }
   if_collect_2nd_moments = parameter.get_bool("if_collect_2nd_moments");
+  if_collect_spec_favreAvg = parameter.get_bool("if_collect_spec_favreAvg");
+  if_collect_scalar_flux = parameter.get_bool("if_collect_scalar_flux");
+  perform_spanwise_average = parameter.get_bool("perform_spanwise_average");
+  if (if_wall_stats) {
+    perform_spanwise_average = true;
+    if_collect_2nd_moments = true;
+  }
   if (!if_collect_2nd_moments) {
     n_rey2nd = 0;
     n_fav2nd = 0;
@@ -26,8 +127,6 @@ SinglePointStat::SinglePointStat(Parameter &_parameter, const Mesh &_mesh, std::
     fav2ndVar = {};
     parameter.update_parameter("rho_p_correlation", false);
   }
-  if_collect_spec_favreAvg = parameter.get_bool("if_collect_spec_favreAvg");
-  perform_spanwise_average = parameter.get_bool("perform_spanwise_average");
   if (!perform_spanwise_average) {
     scalar_fluc_budget = parameter.get_bool("stat_scalar_fluc_budget");
     species_velocity_correlation = parameter.get_bool("stat_species_velocity_correlation");
@@ -43,6 +142,25 @@ SinglePointStat::SinglePointStat(Parameter &_parameter, const Mesh &_mesh, std::
 
     ty_1gg.resize(mesh.n_block);
     ty_0gg.resize(mesh.n_block);
+  }
+
+  if (collect_this_time && if_collect_scalar_flux) {
+    if (!if_collect_2nd_moments) {
+      printf("Error: if_collect_scalar_flux requires if_collect_2nd_moments = 1.\n");
+      MpiParallel::exit();
+    }
+    if (!if_collect_spec_favreAvg) {
+      printf("Error: if_collect_scalar_flux requires if_collect_spec_favreAvg = 1.\n");
+      MpiParallel::exit();
+    }
+    if (species.n_spec <= 0) {
+      printf("Error: if_collect_scalar_flux requires at least one chemical species.\n");
+      MpiParallel::exit();
+    }
+  }
+  if (collect_this_time && if_wall_stats && species.n_spec > 0 && !if_collect_spec_favreAvg) {
+    printf("Error: if_wall_stats with finite-rate species requires if_collect_spec_favreAvg = 1.\n");
+    MpiParallel::exit();
   }
 
   // First, identify which species are to be statistically analyzed.
@@ -104,8 +222,14 @@ SinglePointStat::SinglePointStat(Parameter &_parameter, const Mesh &_mesh, std::
     counter_rey2nd.resize(n_rey2nd, 0);
     counter_fav2nd.resize(n_fav2nd, 0);
   }
+  if (if_wall_stats) {
+    counter_wall_stat.resize(WallStats::n_collect, 0);
+  }
   parameter.update_parameter("n_stat_reynolds_2nd", n_rey2nd);
   parameter.update_parameter("n_stat_favre_2nd", n_fav2nd);
+  parameter.update_parameter("stat_favre2_scalar_var_offset", fav2_scalar_var_offset);
+  parameter.update_parameter("stat_favre2_scalar_flux_u_offset", fav2_scalar_flux_u_offset);
+  parameter.update_parameter("stat_favre2_scalar_flux_v_offset", fav2_scalar_flux_v_offset);
   parameter.update_parameter("reyAveVarIndex", reyAveVarIndex);
   parameter.update_parameter("reyAveScalarIndex", reyAveScalarIndex);
 
@@ -162,6 +286,22 @@ void SinglePointStat::init_stat_name() {
       if (if_collect_2nd_moments)
         fav2ndVar.push_back("rhoPs" + std::to_string(l + 1) + "Ps" + std::to_string(l + 1));
     }
+  }
+  fav2_scalar_var_offset = 7;
+  fav2_scalar_var_count = if_collect_2nd_moments ? (if_collect_spec_favreAvg ? n_spec : 0) + n_ps : 0;
+  fav2_scalar_flux_u_offset = fav2_scalar_var_offset + fav2_scalar_var_count;
+  fav2_scalar_flux_count = if_collect_2nd_moments && if_collect_scalar_flux ? n_spec : 0;
+  if (if_collect_2nd_moments && if_collect_scalar_flux) {
+    n_fav2nd += 2 * n_spec;
+    for (int l = 0; l < n_spec; ++l) {
+      fav2ndVar.push_back("rhoU" + species.spec_name[l]);
+    }
+    fav2_scalar_flux_v_offset = fav2_scalar_flux_u_offset + n_spec;
+    for (int l = 0; l < n_spec; ++l) {
+      fav2ndVar.push_back("rhoV" + species.spec_name[l]);
+    }
+  } else {
+    fav2_scalar_flux_v_offset = fav2_scalar_flux_u_offset;
   }
 
   // Next, see if there are some basic variables except rho, p are to be averaged.
@@ -231,7 +371,7 @@ void SinglePointStat::initialize_statistics_collector() {
 
 void SinglePointStat::compute_offset_for_export_data() {
   const std::filesystem::path out_dir("output/stat");
-  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2;
+  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2, fp_wall;
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_rey_1st.bin").c_str(),
                 MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_rey1);
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_1st.bin").c_str(),
@@ -241,6 +381,10 @@ void SinglePointStat::compute_offset_for_export_data() {
                   MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_rey2);
     MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_2nd.bin").c_str(),
                   MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_fav2);
+  }
+  if (if_wall_stats) {
+    MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_wall.bin").c_str(),
+                  MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_wall);
   }
   MPI_Status status;
   MPI_Offset offset[4]{0, 0, 0, 0};
@@ -292,8 +436,17 @@ void SinglePointStat::compute_offset_for_export_data() {
         gxl::write_str(var.c_str(), fp_fav2, offset[3]);
       }
     }
+    if (if_wall_stats) {
+      constexpr int n_wall_collect = WallStats::n_collect;
+      MPI_File_write_at(fp_wall, 0, &n_block, 1, MPI_INT32_T, &status);
+      MPI_File_write_at(fp_wall, 4, &n_wall_collect, 1, MPI_INT32_T, &status);
+      offset_wall_stat = 8;
+    }
   }
   MPI_Bcast(offset, 4, MPI_OFFSET, 0, MPI_COMM_WORLD);
+  if (if_wall_stats) {
+    MPI_Bcast(&offset_wall_stat, 1, MPI_OFFSET, 0, MPI_COMM_WORLD);
+  }
 
   if (myid != 0) {
     offset_unit[0] = offset[0] + 4 * n_stat_reynolds_1st;
@@ -301,6 +454,9 @@ void SinglePointStat::compute_offset_for_export_data() {
     if (if_collect_2nd_moments) {
       offset_unit[2] = offset[2] + 4 * n_stat_reynolds_2nd;
       offset_unit[3] = offset[3] + 4 * n_stat_favre_2nd;
+    }
+    if (if_wall_stats) {
+      offset_wall_stat += 4 * WallStats::n_collect;
     }
   } else {
     // Process 0 needs to write the counter of every variable.
@@ -327,6 +483,9 @@ void SinglePointStat::compute_offset_for_export_data() {
     if (if_collect_2nd_moments) {
       offset_unit[2] += sz * n_stat_reynolds_2nd + 4 * 3;
       offset_unit[3] += sz * n_stat_favre_2nd + 4 * 3;
+    }
+    if (if_wall_stats) {
+      offset_wall_stat += 4 + static_cast<MPI_Offset>(mesh.mx_blk[b]) * WallStats::n_collect * 8;
     }
   }
 
@@ -369,11 +528,20 @@ void SinglePointStat::compute_offset_for_export_data() {
       }
     }
   }
+  MPI_File_close(&fp_rey1);
+  MPI_File_close(&fp_fav1);
+  if (if_collect_2nd_moments) {
+    MPI_File_close(&fp_rey2);
+    MPI_File_close(&fp_fav2);
+  }
+  if (if_wall_stats) {
+    MPI_File_close(&fp_wall);
+  }
 }
 
 void SinglePointStat::read_previous_statistical_data() {
   const std::filesystem::path out_dir("output/stat");
-  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2;
+  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2, fp_wall;
   // see if the file exists
   if (!(std::filesystem::exists(out_dir.string() + "/coll_rey_1st.bin") &&
         std::filesystem::exists(out_dir.string() + "/coll_fav_1st.bin"))) {
@@ -381,10 +549,19 @@ void SinglePointStat::read_previous_statistical_data() {
       "provide previous stat files!\n");
     MPI_Abort(MPI_COMM_WORLD, 1);
   }
+  if (if_wall_stats && !std::filesystem::exists(out_dir.string() + "/coll_wall.bin")) {
+    printf("Previous wall stat file coll_wall.bin does not exist, please change if_continue_collect_statistics to 0 or "
+      "provide previous wall statistics!\n");
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_rey_1st.bin").c_str(),
                 MPI_MODE_RDONLY, MPI_INFO_NULL, &fp_rey1);
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_1st.bin").c_str(),
                 MPI_MODE_RDONLY, MPI_INFO_NULL, &fp_fav1);
+  if (if_wall_stats) {
+    MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_wall.bin").c_str(),
+                  MPI_MODE_RDONLY, MPI_INFO_NULL, &fp_wall);
+  }
   MPI_Status status;
 
   MPI_Offset offset_read[4]{0, 0, 0, 0};
@@ -466,6 +643,7 @@ void SinglePointStat::read_previous_statistical_data() {
   int n_read_rey2 = 0, n_read_fav2 = 0;
   std::vector<int> read_rey2_index;
   std::vector<int> read_fav2_index;
+  bool has_prev_2nd = false;
   if (if_collect_2nd_moments) {
     if (std::filesystem::exists(out_dir.string() + "/coll_rey_2nd.bin") &&
         std::filesystem::exists(out_dir.string() + "/coll_fav_2nd.bin")) {
@@ -473,6 +651,7 @@ void SinglePointStat::read_previous_statistical_data() {
                     MPI_MODE_RDONLY, MPI_INFO_NULL, &fp_rey2);
       MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_2nd.bin").c_str(),
                     MPI_MODE_RDONLY, MPI_INFO_NULL, &fp_fav2);
+      has_prev_2nd = true;
       // Reynolds 2nd order statistics
       nBlock = 0;
       MPI_File_read_at(fp_rey2, 0, &nBlock, 1, MPI_INT32_T, &status);
@@ -537,7 +716,30 @@ void SinglePointStat::read_previous_statistical_data() {
           }
         }
       }
+    } else if (if_wall_stats) {
+      printf("Previous second-moment stat files are required by if_wall_stats but coll_rey_2nd.bin or "
+        "coll_fav_2nd.bin is missing.\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
     }
+  }
+
+  MPI_Offset offset_wall_read = 0;
+  if (if_wall_stats) {
+    nBlock = 0;
+    MPI_File_read_at(fp_wall, 0, &nBlock, 1, MPI_INT32_T, &status);
+    if (nBlock != mesh.n_block_total) {
+      printf("Error: The number of blocks in coll_wall.bin is not consistent with the current mesh.\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    int n_read_wall = 0;
+    MPI_File_read_at(fp_wall, 4, &n_read_wall, 1, MPI_INT32_T, &status);
+    if (n_read_wall != WallStats::n_collect) {
+      printf("Error: The number of variables in coll_wall.bin is not consistent with the current executable.\n");
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    counter_wall_stat.resize(WallStats::n_collect, 0);
+    MPI_File_read_at(fp_wall, 8, counter_wall_stat.data(), WallStats::n_collect, MPI_INT32_T, &status);
+    offset_wall_read = 8 + 4 * WallStats::n_collect;
   }
 
   int n_block_ahead = 0;
@@ -555,6 +757,9 @@ void SinglePointStat::read_previous_statistical_data() {
     if (if_collect_2nd_moments) {
       offset_read[2] += sz * n_read_rey2 + 4 * 3;
       offset_read[3] += sz * n_read_fav2 + 4 * 3;
+    }
+    if (if_wall_stats) {
+      offset_wall_read += 4 + static_cast<MPI_Offset>(mesh.mx_blk[b]) * WallStats::n_collect * 8;
     }
   }
 
@@ -629,6 +834,21 @@ void SinglePointStat::read_previous_statistical_data() {
       cudaMemcpy(field[b].h_ptr->collect_favre_2nd.data(), field[b].collect_favre_2nd.data(), sz * n_fav2nd,
                  cudaMemcpyHostToDevice);
     }
+    if (if_wall_stats) {
+      int mx_wall = 0;
+      MPI_File_read_at(fp_wall, offset_wall_read, &mx_wall, 1, MPI_INT32_T, &status);
+      offset_wall_read += 4;
+      if (mx_wall != mesh[b].mx) {
+        printf("Error: The mesh size in coll_wall.bin is not consistent with the current mesh.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+      }
+      for (int l = 0; l < WallStats::n_collect; ++l) {
+        MPI_File_read_at(fp_wall, offset_wall_read, field[b].collect_wall_stat[l], mx_wall, MPI_DOUBLE, &status);
+        offset_wall_read += static_cast<MPI_Offset>(mx_wall) * 8;
+      }
+      cudaMemcpy(field[b].h_ptr->collect_wall_stat.data(), field[b].collect_wall_stat.data(),
+                 field[b].collect_wall_stat.size() * WallStats::n_collect * sizeof(real), cudaMemcpyHostToDevice);
+    }
   }
 
   if (!perform_spanwise_average) {
@@ -647,6 +867,15 @@ void SinglePointStat::read_previous_statistical_data() {
       counter_species_dissipation_rate =
           read_species_collect_file<ScalarDissipationRate>(parameter, mesh, n_block_ahead, field);
     }
+  }
+  MPI_File_close(&fp_rey1);
+  MPI_File_close(&fp_fav1);
+  if (has_prev_2nd) {
+    MPI_File_close(&fp_rey2);
+    MPI_File_close(&fp_fav2);
+  }
+  if (if_wall_stats) {
+    MPI_File_close(&fp_wall);
   }
 }
 
@@ -729,8 +958,8 @@ void SinglePointStat::prepare_for_statistical_data_plot(const Species &species) 
         var_name.emplace_back("{T''T''}");
         n_plot += 7;
         nv_old = n_plot;
-        if (if_collect_spec_favreAvg) {
-          n_plot += parameter.get_int("n_spec"); // Y_k
+        if (fav2_scalar_var_count > 0 && if_collect_spec_favreAvg) {
+          n_plot += parameter.get_int("n_spec");
           var_name.resize(n_plot);
           auto &names = species.spec_list;
           for (auto &[name, ind]: names) {
@@ -739,12 +968,47 @@ void SinglePointStat::prepare_for_statistical_data_plot(const Species &species) 
           nv_old = n_plot;
         }
         if (const int n_ps = parameter.get_int("n_ps"); n_ps > 0) {
-          n_plot += n_ps; // Y_k'' dissipation rate
+          n_plot += n_ps;
           var_name.resize(n_plot);
           for (int i = 0; i < n_ps; ++i) {
             var_name[nv_old + i] = "{Ps" + std::to_string(i + 1) + "''" + "Ps" + std::to_string(i + 1) + "''}";
           }
+          nv_old = n_plot;
         }
+        if (if_collect_scalar_flux) {
+          n_plot += parameter.get_int("n_spec");
+          var_name.resize(n_plot);
+          auto &names = species.spec_list;
+          for (auto &[name, ind]: names) {
+            var_name[ind + nv_old] = "{u''" + name + "''}";
+          }
+          nv_old = n_plot;
+          n_plot += parameter.get_int("n_spec");
+          var_name.resize(n_plot);
+          auto &names_v = species.spec_list;
+          for (auto &[name, ind]: names_v) {
+            var_name[ind + nv_old] = "{v''" + name + "''}";
+          }
+        }
+      }
+      if (if_wall_stats) {
+        static const std::array<std::string, WallStats::n_derived> wall_var_name{
+          "y<sup>+</sup>", "y/<greek>d</greek><sub>99</sub>", "y<sup>*</sup>", "U<sup>+</sup>", "U/U<sub>e</sub>",
+          "M<sub>t</sub>", "P<sub>k</sub>", "U<sub>VD</sub><sup>+</sup>", "U<sub>TL</sub><sup>+</sup>",
+          "U<sub>GFM</sub><sup>+</sup>", "U<sub>lin</sub><sup>+</sup>", "U<sub>log</sub><sup>+</sup>", "X<sub>U</sub>",
+          "X<sub>VD</sub>", "X<sub>TL</sub>", "X<sub>GFM</sub>", "R<sub>11</sub>/|<greek>t</greek><sub>w</sub>|",
+          "R<sub>22</sub>/|<greek>t</greek><sub>w</sub>|", "R<sub>33</sub>/|<greek>t</greek><sub>w</sub>|",
+          "-R<sub>12</sub>/|<greek>t</greek><sub>w</sub>|",
+          "<greek>t</greek><sub>vis</sub>/|<greek>t</greek><sub>w</sub>|",
+          "<greek>t</greek><sub>Rey</sub>/|<greek>t</greek><sub>w</sub>|",
+          "<greek>t</greek><sub>tot</sub>/|<greek>t</greek><sub>w</sub>|", "TKE", "K<sup>+</sup>", "T/T<sub>e</sub>",
+          "<greek>r</greek>/<greek>r</greek><sub>e</sub>", "<greek>m</greek>/<greek>m</greek><sub>e</sub>",
+          "<greek>m</greek>/<greek>m</greek><sub>w</sub>", "T<sub>walz</sub>/T<sub>e</sub>"
+        };
+        for (const auto &name: wall_var_name) {
+          var_name.emplace_back(name);
+        }
+        n_plot += WallStats::n_derived;
       }
     }
 
@@ -991,6 +1255,10 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         cudaMemcpy(field[b].stat_favre_2nd.data(), field[b].h_ptr->stat_favre_2nd.data(),
                    sz * parameter.get_int("n_stat_favre_2nd"), cudaMemcpyDeviceToHost);
       }
+      if (if_wall_stats) {
+        cudaMemcpy(field[b].collect_wall_stat.data(), field[b].h_ptr->collect_wall_stat.data(),
+                   field[b].collect_wall_stat.size() * WallStats::n_collect * sizeof(real), cudaMemcpyDeviceToHost);
+      }
     }
   } else {
     // for (int b = 0; b < mesh.n_block; ++b) {
@@ -1020,6 +1288,17 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
     write_thickness_file(local_thickness);
   }
 
+  if (perform_spanwise_average && if_wall_stats) {
+    std::vector<WallStatsRecord> local_wall_records;
+    int local_x_count = 0;
+    for (int blk = 0; blk < mesh.n_block; ++blk) local_x_count += mesh[blk].mx;
+    local_wall_records.reserve(local_x_count);
+    for (int blk = 0; blk < mesh.n_block; ++blk) {
+      compute_wall_stats_for_block(blk, local_wall_records);
+    }
+    write_wall_stats_file(local_wall_records);
+  }
+
   // Next, output them.
   const std::filesystem::path out_dir("output/stat");
   MPI_File fp;
@@ -1041,6 +1320,9 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       mz = 1;
     const int ns_plot = if_collect_spec_favreAvg ? species.n_spec : 0;
     const int n_ps = parameter.get_int("n_ps");
+    const int scalar_var_offset = fav2_scalar_var_offset;
+    const int scalar_flux_u_offset = fav2_scalar_flux_u_offset;
+    const int scalar_flux_v_offset = fav2_scalar_flux_v_offset;
     for (int l = 0; l < 2; ++l) {
       min_val = v.stat_reynolds_1st(0, 0, 0, l);
       max_val = v.stat_reynolds_1st(0, 0, 0, l);
@@ -1158,13 +1440,13 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       }
       if (ns_plot > 0) {
         for (int l = 0; l < species.n_spec; ++l) {
-          min_val = v.stat_favre_2nd(0, 0, 0, l + 7);
-          max_val = v.stat_favre_2nd(0, 0, 0, l + 7);
+          min_val = v.stat_favre_2nd(0, 0, 0, scalar_var_offset + l);
+          max_val = v.stat_favre_2nd(0, 0, 0, scalar_var_offset + l);
           for (int k = 0; k < mz; ++k) {
             for (int j = 0; j < my; ++j) {
               for (int i = 0; i < mx; ++i) {
-                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, l + 7));
-                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, l + 7));
+                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
+                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
               }
             }
           }
@@ -1175,13 +1457,66 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         }
       }
       for (int l = 0; l < n_ps; ++l) {
-        min_val = v.stat_favre_2nd(0, 0, 0, l + 7 + ns_plot);
-        max_val = v.stat_favre_2nd(0, 0, 0, l + 7 + ns_plot);
+        min_val = v.stat_favre_2nd(0, 0, 0, scalar_var_offset + ns_plot + l);
+        max_val = v.stat_favre_2nd(0, 0, 0, scalar_var_offset + ns_plot + l);
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, l + 7 + ns_plot));
-              max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, l + 7 + ns_plot));
+              min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
+              max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
+            }
+          }
+        }
+        MPI_File_write_at(fp, offset, &min_val, 1, MPI_DOUBLE, &status);
+        offset += 8;
+        MPI_File_write_at(fp, offset, &max_val, 1, MPI_DOUBLE, &status);
+        offset += 8;
+      }
+      if (if_collect_scalar_flux) {
+        for (int l = 0; l < species.n_spec; ++l) {
+          min_val = v.stat_favre_2nd(0, 0, 0, scalar_flux_u_offset + l);
+          max_val = v.stat_favre_2nd(0, 0, 0, scalar_flux_u_offset + l);
+          for (int k = 0; k < mz; ++k) {
+            for (int j = 0; j < my; ++j) {
+              for (int i = 0; i < mx; ++i) {
+                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
+                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
+              }
+            }
+          }
+          MPI_File_write_at(fp, offset, &min_val, 1, MPI_DOUBLE, &status);
+          offset += 8;
+          MPI_File_write_at(fp, offset, &max_val, 1, MPI_DOUBLE, &status);
+          offset += 8;
+        }
+        for (int l = 0; l < species.n_spec; ++l) {
+          min_val = v.stat_favre_2nd(0, 0, 0, scalar_flux_v_offset + l);
+          max_val = v.stat_favre_2nd(0, 0, 0, scalar_flux_v_offset + l);
+          for (int k = 0; k < mz; ++k) {
+            for (int j = 0; j < my; ++j) {
+              for (int i = 0; i < mx; ++i) {
+                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
+                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
+              }
+            }
+          }
+          MPI_File_write_at(fp, offset, &min_val, 1, MPI_DOUBLE, &status);
+          offset += 8;
+          MPI_File_write_at(fp, offset, &max_val, 1, MPI_DOUBLE, &status);
+          offset += 8;
+        }
+      }
+    }
+    if (if_wall_stats) {
+      for (int l = 0; l < WallStats::n_derived; ++l) {
+        min_val = finite_or_zero(v.stat_wall_derived(0, 0, 0, l));
+        max_val = finite_or_zero(v.stat_wall_derived(0, 0, 0, l));
+        for (int k = 0; k < mz; ++k) {
+          for (int j = 0; j < my; ++j) {
+            for (int i = 0; i < mx; ++i) {
+              const real value = finite_or_zero(v.stat_wall_derived(i, j, k, l));
+              min_val = std::min(min_val, value);
+              max_val = std::max(max_val, value);
             }
           }
         }
@@ -1241,13 +1576,32 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       }
       if (ns_plot > 0) {
         for (int l = 0; l < ns_plot; ++l) {
-          auto var = v.stat_favre_2nd[l + 7];
+          auto var = v.stat_favre_2nd[l + scalar_var_offset];
           MPI_File_write_at(fp, offset, var, 1, ty, &status);
           offset += memsz;
         }
       }
       for (int l = 0; l < n_ps; ++l) {
-        auto var = v.stat_favre_2nd[l + 7 + ns_plot];
+        auto var = v.stat_favre_2nd[l + scalar_var_offset + ns_plot];
+        MPI_File_write_at(fp, offset, var, 1, ty, &status);
+        offset += memsz;
+      }
+      if (if_collect_scalar_flux) {
+        for (int l = 0; l < species.n_spec; ++l) {
+          auto var = v.stat_favre_2nd[l + scalar_flux_u_offset];
+          MPI_File_write_at(fp, offset, var, 1, ty, &status);
+          offset += memsz;
+        }
+        for (int l = 0; l < species.n_spec; ++l) {
+          auto var = v.stat_favre_2nd[l + scalar_flux_v_offset];
+          MPI_File_write_at(fp, offset, var, 1, ty, &status);
+          offset += memsz;
+        }
+      }
+    }
+    if (if_wall_stats) {
+      for (int l = 0; l < WallStats::n_derived; ++l) {
+        auto var = v.stat_wall_derived[l];
         MPI_File_write_at(fp, offset, var, 1, ty, &status);
         offset += memsz;
       }
@@ -1281,7 +1635,7 @@ SinglePointStat::ThicknessReferenceState SinglePointStat::get_thickness_referenc
 }
 
 void SinglePointStat::compute_thickness_for_block(int blk, const ThicknessReferenceState &ref,
-                                                  std::vector<ThicknessRecord> &records) const {
+  std::vector<ThicknessRecord> &records) const {
   const auto &block = mesh[blk];
   const auto &stat = field[blk];
   const int mx = block.mx;
@@ -1415,6 +1769,450 @@ void SinglePointStat::write_thickness_file(const std::vector<ThicknessRecord> &l
   }
 }
 
+void SinglePointStat::compute_wall_stats_for_block(int blk, std::vector<WallStatsRecord> &records) const {
+  const auto &block = mesh[blk];
+  auto &stat = field[blk];
+  const int mx = block.mx;
+  const int my = block.my;
+  const int N = counter_fav1st.empty() ? 0 : counter_fav1st[0];
+  const real iN = N > 0 ? 1.0 / N : 0;
+  const int ns_stat = if_collect_spec_favreAvg ? species.n_spec : 0;
+  std::vector<real> Y(std::max(species.n_spec, 1), 0);
+  std::vector<real> cp(std::max(species.n_spec, 1), 0);
+
+  for (int i = 0; i < mx; ++i) {
+    WallStatsRecord rec{};
+    rec.value[WR_X] = block.x(i, 0, 0);
+    if (my < 2 || N <= 0) {
+      records.push_back(rec);
+      continue;
+    }
+
+    std::vector<real> y_rel(my, 0), rho(my, 0), p(my, 0), U(my, 0), T(my, 0), mu(my, 0), gamma(my, gamma_air);
+    real cp_e = gamma_air * R_air / (gamma_air - 1);
+    for (int j = 0; j < my; ++j) {
+      y_rel[j] = wall_y(block, i, j);
+      rho[j] = stat.stat_reynolds_1st(i, j, 0, 0);
+      p[j] = stat.stat_reynolds_1st(i, j, 0, 1);
+      U[j] = stat.stat_favre_1st(i, j, 0, 0);
+      T[j] = stat.stat_favre_1st(i, j, 0, 3);
+      if (ns_stat > 0) {
+        for (int l = 0; l < ns_stat; ++l) Y[l] = stat.stat_favre_1st(i, j, 0, 4 + l);
+        species.compute_cp(T[j], cp.data());
+        real imw_mix = 0;
+        real cp_mix = 0;
+        real R_mix = 0;
+        for (int l = 0; l < species.n_spec; ++l) {
+          imw_mix += Y[l] / species.mw[l];
+          cp_mix += Y[l] * cp[l];
+          R_mix += Y[l] * R_u / species.mw[l];
+        }
+        mu[j] = compute_viscosity(T[j], 1.0 / (imw_mix + wall_stats_eps), Y.data(), species);
+        gamma[j] = cp_mix / (cp_mix - R_mix + wall_stats_eps);
+        if (j == my - 1) cp_e = cp_mix;
+      } else {
+        mu[j] = Sutherland(T[j]);
+        gamma[j] = gamma_air;
+      }
+    }
+
+    const real rho_e = rho[my - 1];
+    const real p_e = p[my - 1];
+    const real U_e = U[my - 1];
+    const real T_e = T[my - 1];
+    const real mu_e = mu[my - 1];
+    const real gamma_e = gamma[my - 1];
+    const real a_e = sqrt(std::max(gamma_e * p_e / (rho_e + wall_stats_eps), 0.0));
+    const real Ma_e = std::abs(U_e) / (a_e + wall_stats_eps);
+
+    const real rho_w = rho[0];
+    const real p_w = p[0];
+    const real T_w = T[0];
+    const real mu_w = mu[0];
+
+    const real tau_w = std::abs(stat.collect_wall_stat(i, 0, 0) * iN);
+    const real tau2_w = stat.collect_wall_stat(i, 0, 1) * iN;
+    const real q_w = stat.collect_wall_stat(i, 0, 2) * iN;
+    const real q2_w = stat.collect_wall_stat(i, 0, 3) * iN;
+    const real cf_inst = stat.collect_wall_stat(i, 0, 4) * iN;
+    const real tau_abs = std::abs(tau_w) + wall_stats_eps;
+    const real u_tau = sqrt(std::max(tau_w / (rho_w + wall_stats_eps), 0.0));
+    const real y_tau = mu_w / (rho_w * u_tau + wall_stats_eps);
+    const real C_f = 2 * tau_w / (rho_e * U_e * U_e + wall_stats_eps);
+    const real p_w_rms = sqrt(std::max(stat.stat_reynolds_2nd(i, 0, 0, 1), 0.0));
+    const real tau_w_rms = sqrt(std::max(tau2_w - tau_w * tau_w, 0.0));
+    const real q_w_rms = sqrt(std::max(q2_w - q_w * q_w, 0.0));
+
+    real delta99 = 0;
+    if (U_e > wall_stats_eps) {
+      const real target = 0.99 * U_e;
+      for (int j = 1; j < my; ++j) {
+        if (U[j] >= target) {
+          const real ratio = (target - U[j - 1]) / (U[j] - U[j - 1] + wall_stats_eps);
+          delta99 = y_rel[j - 1] + ratio * (y_rel[j] - y_rel[j - 1]);
+          break;
+        }
+      }
+    }
+
+    real delta_star = 0;
+    real theta = 0;
+    if (delta99 > 0 && rho_e > 0 && U_e > wall_stats_eps) {
+      auto integrands = [&](int j) {
+        const real ru = rho[j] * U[j] / (rho_e * U_e + wall_stats_eps);
+        return std::array<real, 2>{1 - ru, ru * (1 - U[j] / (U_e + wall_stats_eps))};
+      };
+      for (int j = 1; j < my; ++j) {
+        const real y0 = y_rel[j - 1];
+        const real y1 = y_rel[j];
+        if (y0 >= delta99) break;
+        auto f0 = integrands(j - 1);
+        auto f1 = integrands(j);
+        real yb = y1;
+        auto fb = f1;
+        if (y1 > delta99) {
+          yb = delta99;
+          fb[0] = interpolate_at_y(y0, f0[0], y1, f1[0], yb);
+          fb[1] = interpolate_at_y(y0, f0[1], y1, f1[1], yb);
+        }
+        const real dy = yb - y0;
+        if (dy > 0) {
+          delta_star += 0.5 * (f0[0] + fb[0]) * dy;
+          theta += 0.5 * (f0[1] + fb[1]) * dy;
+        }
+        if (y1 >= delta99) break;
+      }
+    }
+
+    const real H = delta_star / (theta + wall_stats_eps);
+    const real Re_theta = rho_e * U_e * theta / (mu_e + wall_stats_eps);
+    const real Re_tau = delta99 / (y_tau + wall_stats_eps);
+    const real recovery = std::pow(parameter.get_real("prandtl_number"), 1.0 / 3.0);
+    const real T_aw = T_e * (1 + recovery * (gamma_e - 1) * 0.5 * Ma_e * Ma_e);
+    const real St = q_w / (rho_e * U_e * cp_e * (T_aw - T_w) + wall_stats_eps);
+    const real twoSt_over_Cf = 2 * St / (C_f + wall_stats_eps);
+    const real dy1_plus = std::abs(y_rel[1] - y_rel[0]) / (y_tau + wall_stats_eps);
+    real dz_wall = 0;
+    if (block.mz > 1) {
+      for (int k = 1; k < block.mz; ++k) {
+        dz_wall += std::abs(block.z(i, 0, k) - block.z(i, 0, k - 1));
+      }
+      dz_wall /= block.mz - 1;
+    }
+    const real dz_plus = dz_wall / (y_tau + wall_stats_eps);
+
+    // real vd_integral = 0;
+    // for (int n = 0; n <= vdii_integral_steps; ++n) {
+    //   const real eta = static_cast<real>(n) / vdii_integral_steps;
+    //   const real T_walz_eta = T_w + (T_aw - T_w) * eta + (T_e - T_aw) * eta * eta;
+    //   const real weight = (n == 0 || n == vdii_integral_steps) ? 0.5 : 1.0;
+    //   vd_integral += weight * sqrt(std::max(T_w / (T_walz_eta + wall_stats_eps), 0.0));
+    // }
+    // vd_integral /= vdii_integral_steps;
+    // const real F_C = 1.0 / (vd_integral * vd_integral + wall_stats_eps);
+    const real a = sqrt(recovery * (gamma_e - 1) * 0.5 * Ma_e * Ma_e * T_e / T_w);
+    const real b = T_aw / T_w - 1;
+    const real A = (2 * a * a - b) / sqrt(b * b + 4 * a * a), B = b / sqrt(b * b + 4 * a * a);
+    const real temp = asin(A) + asin(B);
+    const real F_C = (T_aw / T_e - 1) / (temp * temp);
+    const real Re_theta_i = std::max(mu_e / (mu_w + wall_stats_eps) * Re_theta, 0.0);
+    real C_f_KS = 0, C_f_SM = 0, C_f_CF = 0;
+    if (Re_theta_i > 0) {
+      const real lg = std::log10(2 * Re_theta_i + wall_stats_eps);
+      const real denom_ks = lg * (17.075 * lg + 14.832);
+      const real C_fi_KS = denom_ks > wall_stats_eps ? 1.0 / denom_ks : 0.0;
+      const real C_fi_SM = 0.024 * std::pow(Re_theta_i, -0.25);
+      const real denom_cf = 2.604 * std::log(Re_theta_i + wall_stats_eps) + 4.127;
+      const real C_fi_CF = denom_cf > wall_stats_eps ? 2.0 / (denom_cf * denom_cf) : 0.0;
+      C_f_KS = C_fi_KS / (F_C + wall_stats_eps);
+      C_f_SM = C_fi_SM / (F_C + wall_stats_eps);
+      C_f_CF = C_fi_CF / (F_C + wall_stats_eps);
+    }
+
+    std::vector<real> y_plus(my, 0), y_star(my, 0), U_plus(my, 0), U_VD(my, 0), U_TL(my, 0), U_GFM(my, 0);
+    std::vector<real> f_vd(my, 0), f_tl(my, 0), s_gfm(my, 0);
+    for (int j = 0; j < my; ++j) {
+      y_plus[j] = rho_w * u_tau * y_rel[j] / (mu_w + wall_stats_eps);
+      y_star[j] = y_rel[j] * sqrt(std::max(rho[j] * tau_w, 0.0)) / (mu[j] + wall_stats_eps);
+      U_plus[j] = U[j] / (u_tau + wall_stats_eps);
+      f_vd[j] = sqrt(std::max(rho[j] / (rho_w + wall_stats_eps), 0.0));
+    }
+    for (int j = 0; j < my; ++j) {
+      const real drho_dy = derivative_values(rho, y_rel, j);
+      const real dmu_dy = derivative_values(mu, y_rel, j);
+      const real density_term = 0.5 * y_rel[j] * drho_dy / (rho[j] + wall_stats_eps);
+      const real viscosity_term = y_rel[j] * dmu_dy / (mu[j] + wall_stats_eps);
+      f_tl[j] = f_vd[j] * (1 + density_term - viscosity_term);
+    }
+    for (int j = 1; j < my; ++j) {
+      const real dUplus = U_plus[j] - U_plus[j - 1];
+      U_VD[j] = U_VD[j - 1] + 0.5 * (f_vd[j] + f_vd[j - 1]) * dUplus;
+      U_TL[j] = U_TL[j - 1] + 0.5 * (f_tl[j] + f_tl[j - 1]) * dUplus;
+    }
+    for (int j = 0; j < my; ++j) {
+      const real mu_plus = mu[j] / (mu_w + wall_stats_eps);
+      const real dU_dystar = derivative_values(U_plus, y_star, j);
+      const real dU_dyplus = derivative_values(U_plus, y_plus, j);
+      const real s_eq = dU_dystar / (mu_plus + wall_stats_eps);
+      const real s_tl = mu_plus * dU_dyplus;
+      s_gfm[j] = s_eq / (1 + s_eq - s_tl + wall_stats_eps);
+    }
+    for (int j = 1; j < my; ++j) {
+      const real dystar = y_star[j] - y_star[j - 1];
+      U_GFM[j] = U_GFM[j - 1] + 0.5 * (s_gfm[j] + s_gfm[j - 1]) * dystar;
+    }
+
+    real urms_plus_max = 0, yplus_urms_max = 0;
+    real minus_Ruv_plus_max = 0, yplus_Ruv_max = 0;
+    real Trms_Te_max = 0, yplus_Trms_max = 0;
+    for (int j = 0; j < my; ++j) {
+      const real dUdy = derivative_values(U, y_rel, j);
+      const real a = sqrt(std::max(gamma[j] * p[j] / (rho[j] + wall_stats_eps), 0.0));
+      const real uu = stat.stat_favre_2nd(i, j, 0, 0);
+      const real vv = stat.stat_favre_2nd(i, j, 0, 1);
+      const real ww = stat.stat_favre_2nd(i, j, 0, 2);
+      const real uv = stat.stat_favre_2nd(i, j, 0, 3);
+      const real TT = stat.stat_favre_2nd(i, j, 0, 6);
+      const real U_Ue = U[j] / (U_e + wall_stats_eps);
+      const real tau_vis = mu[j] * dUdy;
+      const real tau_rey = -rho[j] * uv;
+      const real tau_tot = tau_vis + tau_rey;
+      const real TKE = 0.5 * (uu + vv + ww);
+      const real y_delta99 = delta99 > 0 ? y_rel[j] / (delta99 + wall_stats_eps) : 0;
+      const real T_walz_Te = T_w / (T_e + wall_stats_eps) +
+                             (T_aw - T_w) / (T_e + wall_stats_eps) * U_Ue +
+                             (T_e - T_aw) / (T_e + wall_stats_eps) * U_Ue * U_Ue;
+      const real derived[WallStats::n_derived]{
+        y_plus[j],
+        y_delta99,
+        y_star[j],
+        U_plus[j],
+        U_Ue,
+        sqrt(std::max(uu + vv + ww, 0.0)) / (a + wall_stats_eps),
+        -rho[j] * uv * dUdy,
+        U_VD[j],
+        U_TL[j],
+        U_GFM[j],
+        y_plus[j],
+        std::log(y_plus[j] + wall_stats_eps) / wall_law_kappa + wall_law_B,
+        y_plus[j] * derivative_values(U_plus, y_plus, j),
+        y_plus[j] * derivative_values(U_VD, y_plus, j),
+        y_star[j] * derivative_values(U_TL, y_star, j),
+        y_star[j] * derivative_values(U_GFM, y_star, j),
+        rho[j] * uu / tau_abs,
+        rho[j] * vv / tau_abs,
+        rho[j] * ww / tau_abs,
+        -rho[j] * uv / tau_abs,
+        tau_vis / tau_abs,
+        tau_rey / tau_abs,
+        tau_tot / tau_abs,
+        TKE,
+        TKE / (u_tau * u_tau + wall_stats_eps),
+        T[j] / (T_e + wall_stats_eps),
+        rho[j] / (rho_e + wall_stats_eps),
+        mu[j] / (mu_e + wall_stats_eps),
+        mu[j] / (mu_w + wall_stats_eps),
+        T_walz_Te
+      };
+      for (int l = 0; l < WallStats::n_derived; ++l) {
+        stat.stat_wall_derived(i, j, 0, l) = derived[l];
+      }
+
+      if (delta99 > 0 && y_rel[j] <= delta99) {
+        const real urms_plus = sqrt(std::max(rho[j] * uu / tau_abs, 0.0));
+        const real minus_Ruv_plus = -rho[j] * uv / tau_abs;
+        const real Trms_Te = sqrt(std::max(TT, 0.0)) / (T_e + wall_stats_eps);
+        if (urms_plus > urms_plus_max) {
+          urms_plus_max = urms_plus;
+          yplus_urms_max = y_plus[j];
+        }
+        if (minus_Ruv_plus > minus_Ruv_plus_max) {
+          minus_Ruv_plus_max = minus_Ruv_plus;
+          yplus_Ruv_max = y_plus[j];
+        }
+        if (Trms_Te > Trms_Te_max) {
+          Trms_Te_max = Trms_Te;
+          yplus_Trms_max = y_plus[j];
+        }
+      }
+    }
+
+    rec.value[WR_DELTA99] = delta99;
+    rec.value[WR_DELTA_STAR] = delta_star;
+    rec.value[WR_THETA] = theta;
+    rec.value[WR_H] = H;
+    rec.value[WR_RE_THETA] = Re_theta;
+    rec.value[WR_RE_TAU] = Re_tau;
+    rec.value[WR_U_E] = U_e;
+    rec.value[WR_RHO_E] = rho_e;
+    rec.value[WR_T_E] = T_e;
+    rec.value[WR_P_E] = p_e;
+    rec.value[WR_MU_E] = mu_e;
+    rec.value[WR_MA_E] = Ma_e;
+    rec.value[WR_P_W] = p_w;
+    rec.value[WR_RHO_W] = rho_w;
+    rec.value[WR_T_W] = T_w;
+    rec.value[WR_MU_W] = mu_w;
+    rec.value[WR_TAU_W] = tau_w;
+    rec.value[WR_Q_W] = q_w;
+    rec.value[WR_U_TAU] = u_tau;
+    rec.value[WR_C_F] = C_f;
+    rec.value[WR_C_F_INST] = cf_inst;
+    rec.value[WR_Y_TAU] = y_tau;
+    rec.value[WR_P_W_RMS] = p_w_rms;
+    rec.value[WR_TAU_W_RMS] = tau_w_rms;
+    rec.value[WR_Q_W_RMS] = q_w_rms;
+    rec.value[WR_URMS_PLUS_MAX] = urms_plus_max;
+    rec.value[WR_YPLUS_URMS_MAX] = yplus_urms_max;
+    rec.value[WR_MINUS_RUV_PLUS_MAX] = minus_Ruv_plus_max;
+    rec.value[WR_YPLUS_RUV_MAX] = yplus_Ruv_max;
+    rec.value[WR_TRMS_TE_MAX] = Trms_Te_max;
+    rec.value[WR_YPLUS_TRMS_MAX] = yplus_Trms_max;
+    rec.value[WR_T_AW] = T_aw;
+    rec.value[WR_ST] = St;
+    rec.value[WR_2ST_CF] = twoSt_over_Cf;
+    rec.value[WR_P_W_RMS_TAU] = p_w_rms / tau_abs;
+    rec.value[WR_TAU_W_RMS_TAU] = tau_w_rms / tau_abs;
+    rec.value[WR_Q_W_RMS_TAU] = q_w_rms / tau_abs;
+    rec.value[WR_DY1_PLUS] = dy1_plus;
+    rec.value[WR_DZ_PLUS] = dz_plus;
+    rec.value[WR_C_F_KS] = C_f_KS;
+    rec.value[WR_C_F_SM] = C_f_SM;
+    rec.value[WR_C_F_CF] = C_f_CF;
+    records.push_back(rec);
+  }
+}
+
+void SinglePointStat::write_wall_stats_file(const std::vector<WallStatsRecord> &local_records) const {
+  constexpr int n_value = WallStats::n_record;
+  std::vector<real> local_buffer;
+  local_buffer.reserve(local_records.size() * n_value);
+  for (const auto &rec: local_records) {
+    for (const auto v: rec.value) local_buffer.push_back(v);
+  }
+
+  const int send_count = static_cast<int>(local_buffer.size());
+  std::vector<int> recv_counts;
+  if (myid == 0) recv_counts.resize(parameter.get_int("n_proc"));
+  MPI_Gather(&send_count, 1, MPI_INT, myid == 0 ? recv_counts.data() : nullptr, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+  std::vector<int> displs;
+  int total_count = 0;
+  if (myid == 0) {
+    displs.resize(recv_counts.size(), 0);
+    for (size_t i = 1; i < recv_counts.size(); ++i) displs[i] = displs[i - 1] + recv_counts[i - 1];
+    total_count = displs.empty() ? 0 : displs.back() + recv_counts.back();
+  }
+
+  std::vector<real> recv_buffer;
+  if (myid == 0) recv_buffer.resize(total_count);
+  MPI_Gatherv(local_buffer.data(), send_count, MPI_DOUBLE, myid == 0 ? recv_buffer.data() : nullptr,
+              myid == 0 ? recv_counts.data() : nullptr, myid == 0 ? displs.data() : nullptr, MPI_DOUBLE, 0,
+              MPI_COMM_WORLD);
+
+  if (myid != 0) return;
+
+  std::vector<WallStatsRecord> records;
+  records.reserve(recv_buffer.size() / n_value);
+  for (size_t i = 0; i + n_value - 1 < recv_buffer.size(); i += n_value) {
+    WallStatsRecord rec{};
+    for (int l = 0; l < n_value; ++l) rec.value[l] = finite_or_zero(recv_buffer[i + l]);
+    records.push_back(rec);
+  }
+  std::stable_sort(records.begin(), records.end(),
+                   [](const WallStatsRecord &lhs, const WallStatsRecord &rhs) {
+                     return lhs.value[WR_X] < rhs.value[WR_X];
+                   });
+
+  for (size_t i = 0; i < records.size(); ++i) {
+    real dpedx = 0;
+    real dx = 0;
+    if (records.size() == 1) {
+      dpedx = 0;
+      dx = 0;
+    } else if (i == 0) {
+      const real x0 = records[i].value[WR_X], x1 = records[i + 1].value[WR_X];
+      dpedx = (records[i + 1].value[WR_P_E] - records[i].value[WR_P_E]) / (x1 - x0 + wall_stats_eps);
+      dx = x1 - x0;
+    } else if (i + 1 == records.size()) {
+      const real x0 = records[i - 1].value[WR_X], x1 = records[i].value[WR_X];
+      dpedx = (records[i].value[WR_P_E] - records[i - 1].value[WR_P_E]) / (x1 - x0 + wall_stats_eps);
+      dx = x1 - x0;
+    } else {
+      const real x0 = records[i - 1].value[WR_X], x1 = records[i + 1].value[WR_X];
+      dpedx = (records[i + 1].value[WR_P_E] - records[i - 1].value[WR_P_E]) / (x1 - x0 + wall_stats_eps);
+      dx = 0.5 * (x1 - x0);
+    }
+    records[i].value[WR_DP_E_DX] = dpedx;
+    records[i].value[WR_BETA] = records[i].value[WR_DELTA_STAR] * dpedx /
+                                (std::abs(records[i].value[WR_TAU_W]) + wall_stats_eps);
+    records[i].value[WR_DX_PLUS] = std::abs(dx) / (records[i].value[WR_Y_TAU] + wall_stats_eps);
+  }
+
+  const std::filesystem::path out_file("output/stat/wall_stats.txt");
+  std::ofstream out(out_file, std::ios::trunc);
+  static const std::array<const char *, WallStats::n_record> wall_record_name{
+    "x",
+    "<greek>d</greek><sub>99</sub>",
+    "<greek>d</greek><sup>*</sup>",
+    "<greek>q</greek>",
+    "H",
+    "Re<sub><greek>q</greek></sub>",
+    "Re<sub><greek>t</greek></sub>",
+    "U<sub>e</sub>",
+    "<greek>r</greek><sub>e</sub>",
+    "T<sub>e</sub>",
+    "p<sub>e</sub>",
+    "<greek>m</greek><sub>e</sub>",
+    "Ma<sub>e</sub>",
+    "p<sub>w</sub>",
+    "<greek>r</greek><sub>w</sub>",
+    "T<sub>w</sub>",
+    "<greek>m</greek><sub>w</sub>",
+    "<greek>t</greek><sub>w</sub>",
+    "q<sub>w</sub>",
+    "u<sub><greek>t</greek></sub>",
+    "C<sub>f</sub>",
+    "C<sub>f</sub><sup>inst</sup>",
+    "y<sub><greek>t</greek></sub>",
+    "p<sub>w_rms</sub>",
+    "<greek>t</greek><sub>w_rms</sub>",
+    "q<sub>w_rms</sub>",
+    "u<sub>rms_max</sub><sup>+</sup>",
+    "y<sub>u_rms_max</sub><sup>+</sup>",
+    "-R<sub>12_max</sub><sup>+</sup>",
+    "y<sub>R12_max</sub><sup>+</sup>",
+    "T<sub>rms_max</sub>/T<sub>e</sub>",
+    "y<sub>T_rms_max</sub><sup>+</sup>",
+    "dp<sub>e</sub>/dx",
+    "<greek>b</greek>",
+    "T<sub>aw</sub>",
+    "St",
+    "2St/C<sub>f</sub>",
+    "p<sub>w_rms</sub>/|<greek>t</greek><sub>w</sub>|",
+    "<greek>t</greek><sub>w_rms</sub>/|<greek>t</greek><sub>w</sub>|",
+    "q<sub>w_rms</sub>/|<greek>t</greek><sub>w</sub>|",
+    "<greek>D</greek>y<sub>1</sub><sup>+</sup>",
+    "<greek>D</greek>x<sup>+</sup>",
+    "<greek>D</greek>z<sup>+</sup>",
+    "C<sub>f</sub><sup>KS</sup>",
+    "C<sub>f</sub><sup>SM</sup>",
+    "C<sub>f</sub><sup>CF</sup>"
+  };
+  for (int l = 0; l < n_value; ++l) {
+    if (l > 0) out << ' ';
+    out << wall_record_name[l];
+  }
+  out << '\n';
+  for (const auto &rec: records) {
+    for (int l = 0; l < n_value; ++l) {
+      if (l > 0) out << ' ';
+      out << finite_or_zero(rec.value[l]);
+    }
+    out << '\n';
+  }
+}
+
 void SinglePointStat::collect_data(DParameter *param) {
   dim3 tpb{8, 8, 4};
   if (mesh.dimension == 2 || perform_spanwise_average) {
@@ -1467,11 +2265,14 @@ void SinglePointStat::collect_data(DParameter *param) {
   for (auto &c: counter_species_velocity_correlation) {
     ++c;
   }
+  for (auto &c: counter_wall_stat) {
+    ++c;
+  }
 }
 
 void SinglePointStat::export_statistical_data(DParameter *param) {
   const std::filesystem::path out_dir("output/stat");
-  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2;
+  MPI_File fp_rey1, fp_fav1, fp_rey2, fp_fav2, fp_wall;
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_rey_1st.bin").c_str(),
                 MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_rey1);
   MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_1st.bin").c_str(),
@@ -1482,10 +2283,15 @@ void SinglePointStat::export_statistical_data(DParameter *param) {
     MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_fav_2nd.bin").c_str(),
                   MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_fav2);
   }
+  if (if_wall_stats) {
+    MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/coll_wall.bin").c_str(),
+                  MPI_MODE_WRONLY, MPI_INFO_NULL, &fp_wall);
+  }
   MPI_Status status;
 
   MPI_Offset offset[4]{0, 0, 0, 0};
   memcpy(offset, offset_unit, sizeof(offset_unit));
+  MPI_Offset offset_wall = offset_wall_stat;
   if (myid == 0) {
     MPI_File_write_at(fp_rey1, offset[0], counter_rey1st.data(), n_reyAve, MPI_INT32_T, &status);
     offset[0] += 4 * n_reyAve;
@@ -1498,6 +2304,10 @@ void SinglePointStat::export_statistical_data(DParameter *param) {
       offset[2] += 4 * n_rey2nd;
       MPI_File_write_at(fp_fav2, offset[3], counter_fav2nd.data(), n_fav2nd, MPI_INT32_T, &status);
       offset[3] += 4 * n_fav2nd;
+    }
+    if (if_wall_stats) {
+      MPI_File_write_at(fp_wall, offset_wall, counter_wall_stat.data(), WallStats::n_collect, MPI_INT32_T, &status);
+      offset_wall += 4 * WallStats::n_collect;
     }
   }
   for (int b = 0; b < mesh.n_block; ++b) {
@@ -1518,6 +2328,10 @@ void SinglePointStat::export_statistical_data(DParameter *param) {
                  cudaMemcpyDeviceToHost);
       cudaMemcpy(field[b].collect_favre_2nd.data(), zone->collect_favre_2nd.data(), sz * n_fav2nd,
                  cudaMemcpyDeviceToHost);
+    }
+    if (if_wall_stats) {
+      cudaMemcpy(field[b].collect_wall_stat.data(), zone->collect_wall_stat.data(),
+                 field[b].collect_wall_stat.size() * WallStats::n_collect * sizeof(real), cudaMemcpyDeviceToHost);
     }
 
     // We create this datatype because in the original MPI_File_write_at, the number of elements is a 64-bit integer.
@@ -1561,6 +2375,14 @@ void SinglePointStat::export_statistical_data(DParameter *param) {
       MPI_File_write_at(fp_fav2, offset[3], field[b].collect_favre_2nd.data(), n_fav2nd, ty, &status);
       offset[3] += sz * n_fav2nd;
     }
+    if (if_wall_stats) {
+      MPI_File_write_at(fp_wall, offset_wall, &mx, 1, MPI_INT32_T, &status);
+      offset_wall += 4;
+      for (int l = 0; l < WallStats::n_collect; ++l) {
+        MPI_File_write_at(fp_wall, offset_wall, field[b].collect_wall_stat[l], mx, MPI_DOUBLE, &status);
+        offset_wall += static_cast<MPI_Offset>(mx) * 8;
+      }
+    }
   }
 
   MPI_File_close(&fp_rey1);
@@ -1568,6 +2390,9 @@ void SinglePointStat::export_statistical_data(DParameter *param) {
   if (if_collect_2nd_moments) {
     MPI_File_close(&fp_rey2);
     MPI_File_close(&fp_fav2);
+  }
+  if (if_wall_stats) {
+    MPI_File_close(&fp_wall);
   }
 
   // Any other stats that need no ghost layer
@@ -1663,6 +2488,13 @@ __global__ void collect_singlePointStat_1ghostLayer_Step1(DZone *zone, DParamete
     for (int l = 0; l < param->n_ps; ++l) {
       fav2nd(i, j, k, scalar_offset + l) += rho * sv(i, j, k, param->i_ps + l) * sv(i, j, k, param->i_ps + l);
     }
+    if (param->if_collect_scalar_flux) {
+      for (int l = 0; l < param->n_spec; ++l) {
+        const real y = sv(i, j, k, l);
+        fav2nd(i, j, k, param->statFavre2ScalarFluxUOffset + l) += rho * u * y;
+        fav2nd(i, j, k, param->statFavre2ScalarFluxVOffset + l) += rho * v * y;
+      }
+    }
   }
 
   // Stats which needs an additional ghost layer
@@ -1683,6 +2515,8 @@ __global__ void collect_singlePointStat_spanAvg_Step1(DZone *zone, DParameter *p
   real rho_sum = 0.0, p_sum = 0.0, rhoU_sum = 0.0, rhoV_sum = 0.0, rhoW_sum = 0.0, rhoT_sum = 0.0;
   real rhoY_sum[MAX_SPEC_NUMBER + MAX_PASSIVE_SCALAR_NUMBER]{};
   real rhoYY_sum[MAX_SPEC_NUMBER + MAX_PASSIVE_SCALAR_NUMBER]{};
+  real rhoUY_sum[MAX_SPEC_NUMBER]{};
+  real rhoVY_sum[MAX_SPEC_NUMBER]{};
   real rhoRho_sum{0.0}, pP_sum{0.0}, Rij_sum[6]{}, rhoTT_sum{0.0}, rhoP_sum{0.0};
   const int ns_stat = param->if_collect_spec_favreAvg ? param->n_spec : 0;
   for (int k = 0; k < zone->mz; ++k) {
@@ -1718,6 +2552,13 @@ __global__ void collect_singlePointStat_spanAvg_Step1(DZone *zone, DParameter *p
       for (int l = 0; l < param->n_ps; ++l)
         rhoYY_sum[ns_stat + l] +=
             rho * sv(i, j, k, param->i_ps + l) * sv(i, j, k, param->i_ps + l);
+      if (param->if_collect_scalar_flux) {
+        for (int l = 0; l < param->n_spec; ++l) {
+          const real y = sv(i, j, k, l);
+          rhoUY_sum[l] += rho * u * y;
+          rhoVY_sum[l] += rho * v * y;
+        }
+      }
     }
   }
 
@@ -1749,7 +2590,51 @@ __global__ void collect_singlePointStat_spanAvg_Step1(DZone *zone, DParameter *p
     fav2nd(i, j, 0, 5) += Rij_sum[5] * iNz; // rho*v*w
     fav2nd(i, j, 0, 6) += rhoTT_sum * iNz;  // rho*T*T
     for (int l = 0; l < ns_stat + param->n_ps; ++l)
-      fav2nd(i, j, 0, 7 + l) += rhoYY_sum[l] * iNz;
+      fav2nd(i, j, 0, param->statFavre2ScalarVarOffset + l) += rhoYY_sum[l] * iNz;
+    if (param->if_collect_scalar_flux) {
+      for (int l = 0; l < param->n_spec; ++l) {
+        fav2nd(i, j, 0, param->statFavre2ScalarFluxUOffset + l) += rhoUY_sum[l] * iNz;
+        fav2nd(i, j, 0, param->statFavre2ScalarFluxVOffset + l) += rhoVY_sum[l] * iNz;
+      }
+    }
+  }
+
+  if (param->if_wall_stats && i >= 0 && i < zone->mx && j == 0 && zone->my > 1) {
+    real tau_sum = 0.0, tau2_sum = 0.0, q_sum = 0.0, q2_sum = 0.0, cf_inst_sum = 0.0;
+    for (int k = 0; k < zone->mz; ++k) {
+      const real dy = zone->y(i, 1, k) - zone->y(i, 0, k);
+      if (abs(dy) <= 1e-30) continue;
+      const real mu_w = zone->mul(i, 0, k);
+      const real dudy = (bv(i, 1, k, 1) - bv(i, 0, k, 1)) / dy;
+      const real tau_raw = abs(mu_w * dudy);
+      const real tau = isfinite(tau_raw) ? tau_raw : 0;
+      const real lambda_w = param->n_spec > 0
+                            ? zone->thermal_conductivity(i, 0, k)
+                            : mu_w * (gamma_air * R_air / (gamma_air - 1)) / param->Pr;
+      const real dTdy = (bv(i, 1, k, 5) - bv(i, 0, k, 5)) / dy;
+      const real q_raw = -lambda_w * dTdy;
+      const real q = isfinite(q_raw) ? q_raw : 0;
+      // If multi-component flow, a species diffusion heat flux should be included.
+
+      // The rho_e and u_e are assumed to be the freestream value for now.
+      const real rho_e = param->rho_ref, Ue = param->v_ref;
+      // const real rho_e = bv(i, zone->my - 1, k, 0);
+      // const real Ue = bv(i, zone->my - 1, k, 1);
+      const real denom = rho_e * Ue * Ue;
+      const real cf_raw = denom > 1e-30 && isfinite(denom) ? 2 * tau / denom : 0;
+      const real cf_inst = isfinite(cf_raw) ? cf_raw : 0;
+      tau_sum += tau;
+      tau2_sum += tau * tau;
+      q_sum += q;
+      q2_sum += q * q;
+      cf_inst_sum += cf_inst;
+    }
+    auto &wall = zone->collect_wall_stat;
+    wall(i, 0, 0) += tau_sum * iNz;
+    wall(i, 0, 1) += tau2_sum * iNz;
+    wall(i, 0, 2) += q_sum * iNz;
+    wall(i, 0, 3) += q2_sum * iNz;
+    wall(i, 0, 4) += cf_inst_sum * iNz;
   }
 }
 
@@ -1826,7 +2711,18 @@ __global__ void compute_statistical_data_spanwise_average(DZone *zone, const DPa
     favre2nd(i, j, 0, 5) = col_fav2nd(i, j, 0, 5) * iRho - v * w;
     favre2nd(i, j, 0, 6) = col_fav2nd(i, j, 0, 6) * iRho - T * T;
     for (int l = 0; l < n_scalar_stat; ++l)
-      favre2nd(i, j, 0, 7 + l) = col_fav2nd(i, j, 0, 7 + l) * iRho - favre(i, j, 0, 4 + l) * favre(i, j, 0, 4 + l);
+      favre2nd(i, j, 0, param->statFavre2ScalarVarOffset + l) =
+          col_fav2nd(i, j, 0, param->statFavre2ScalarVarOffset + l) * iRho -
+          favre(i, j, 0, 4 + l) * favre(i, j, 0, 4 + l);
+    if (param->if_collect_scalar_flux) {
+      for (int l = 0; l < param->n_spec; ++l) {
+        const real Y = favre(i, j, 0, 4 + l);
+        favre2nd(i, j, 0, param->statFavre2ScalarFluxUOffset + l) =
+            col_fav2nd(i, j, 0, param->statFavre2ScalarFluxUOffset + l) * iRho - u * Y;
+        favre2nd(i, j, 0, param->statFavre2ScalarFluxVOffset + l) =
+            col_fav2nd(i, j, 0, param->statFavre2ScalarFluxVOffset + l) * iRho - v * Y;
+      }
+    }
   }
 }
 } // cfd

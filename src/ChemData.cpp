@@ -524,14 +524,11 @@ void cfd::Species::set_nspec(int n_sp, int n_elem) {
   elem_comp.resize(n_sp, n_elem);
   mw.resize(n_sp, 0);
   n_temperature_range.resize(n_sp, 2);
-  #ifdef HighTempMultiPart
-  #else // Combustion2Part
   t_low.resize(n_sp, 300);
   t_mid.resize(n_sp, 1000);
   t_high.resize(n_sp, 5000);
   high_temp_coeff.resize(n_sp, 7);
   low_temp_coeff.resize(n_sp, 7);
-  #endif
   geometry.resize(n_sp, 0);
   LJ_potent_inv.resize(n_sp, 0);
   vis_coeff.resize(n_sp, 0);

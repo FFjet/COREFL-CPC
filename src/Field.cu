@@ -38,6 +38,10 @@ cfd::Field::Field(Parameter &parameter, const Block &block_in) :
     collect_favre_1st.resize(mx, my, 1, parameter.get_int("n_stat_favre_1st"), 1);
     collect_reynolds_2nd.resize(mx, my, 1, parameter.get_int("n_stat_reynolds_2nd"), 1);
     collect_favre_2nd.resize(mx, my, 1, parameter.get_int("n_stat_favre_2nd"), 1);
+    if (parameter.get_bool("if_wall_stats")) {
+      collect_wall_stat.allocate_memory(mx, 1, WallStats::n_collect, 0);
+      stat_wall_derived.resize(mx, my, 1, WallStats::n_derived, 0);
+    }
     if (parameter.get_bool("output_statistics_plt")) {
       stat_reynolds_1st.resize(
         mx, my, 1, parameter.get_int("n_stat_reynolds_1st") + parameter.get_int("n_stat_reynolds_1st_scalar"), 0);
@@ -549,9 +553,11 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
   h_ptr->fFlux.allocate_memory(mx, my, mz, n_var, ngg);
   h_ptr->gFlux.allocate_memory(mx, my, mz, n_var, ngg);
   h_ptr->hFlux.allocate_memory(mx, my, mz, n_var, ngg);
-  if (parameter.get_int("viscous_order") == 2) {
-    h_ptr->vis_flux.allocate_memory(mx, my, mz, n_var - 1, 1);
-  }
+  // const bool use_async_rk3 =
+  //     !parameter.get_bool("steady") && parameter.get_int("temporal_scheme") == 3 && parameter.get_bool("use_async_rk3");
+  // if (parameter.get_int("viscous_order") == 2 && !use_async_rk3) {
+  //   h_ptr->vis_flux.allocate_memory(mx, my, mz, n_var - 1, 1);
+  // }
   if (!(!parameter.get_bool("steady") && parameter.get_int("temporal_scheme") == 3 &&
         parameter.get_bool("fixed_time_step"))) {
     h_ptr->inv_spectr_rad.allocate_memory(mx, my, mz, 0);
@@ -599,6 +605,8 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
 
   // The collected data includes one layer of ghost mesh, which may be used to compute the gradients.
   const auto perform_spanwise_average = parameter.get_bool("perform_spanwise_average");
+  const bool need_device_statistics = parameter.get_bool("output_statistics_plt") ||
+                                      parameter.get_bool("if_monitor_block_burst");
   if (perform_spanwise_average) {
     h_ptr->collect_reynolds_1st.allocate_memory(
       mx, my, 1, parameter.get_int("n_stat_reynolds_1st") + parameter.get_int("n_stat_reynolds_1st_scalar"), 1);
@@ -607,7 +615,10 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
       h_ptr->collect_reynolds_2nd.allocate_memory(mx, my, 1, parameter.get_int("n_stat_reynolds_2nd"), 1);
       h_ptr->collect_favre_2nd.allocate_memory(mx, my, 1, parameter.get_int("n_stat_favre_2nd"), 1);
     }
-    if (parameter.get_bool("output_statistics_plt")) {
+    if (parameter.get_bool("if_wall_stats")) {
+      h_ptr->collect_wall_stat.allocate_memory(mx, 1, WallStats::n_collect, 0);
+    }
+    if (need_device_statistics) {
       h_ptr->stat_reynolds_1st.allocate_memory(
         mx, my, 1, parameter.get_int("n_stat_reynolds_1st") + parameter.get_int("n_stat_reynolds_1st_scalar"), 0);
       h_ptr->stat_favre_1st.allocate_memory(mx, my, 1, parameter.get_int("n_stat_favre_1st"), 0);
@@ -621,6 +632,13 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
     if (parameter.get_bool("if_collect_2nd_moments")) {
       h_ptr->collect_reynolds_2nd.allocate_memory(mx, my, mz, parameter.get_int("n_stat_reynolds_2nd"), 1);
       h_ptr->collect_favre_2nd.allocate_memory(mx, my, mz, parameter.get_int("n_stat_favre_2nd"), 1);
+    }
+    if (need_device_statistics) {
+      h_ptr->stat_reynolds_1st.allocate_memory(
+        mx, my, mz, parameter.get_int("n_stat_reynolds_1st") + parameter.get_int("n_stat_reynolds_1st_scalar"), 1);
+      h_ptr->stat_favre_1st.allocate_memory(mx, my, mz, parameter.get_int("n_stat_favre_1st"), 1);
+      h_ptr->stat_reynolds_2nd.allocate_memory(mx, my, mz, parameter.get_int("n_stat_reynolds_2nd"), 1);
+      h_ptr->stat_favre_2nd.allocate_memory(mx, my, mz, parameter.get_int("n_stat_favre_2nd"), 1);
     }
 
     // other statistics
@@ -680,64 +698,79 @@ void cfd::Field::setup_device_memory(const Parameter &parameter) {
          static_cast<real>(free) / 1024 / 1024 / 1024, static_cast<real>(total - free) / 1024 / 1024 / 1024);
 }
 
-void cfd::Field::copy_data_from_device(const Parameter &parameter) {
-  const auto size = (block.mx + 2 * block.ngg) * (block.my + 2 * block.ngg) * (block.mz + 2 * block.ngg);
+namespace {
+void copy_field_data_from_device_impl(cfd::Field &field, const cfd::Parameter &parameter, cudaStream_t stream,
+                                      bool async_copy) {
+  const auto size = (field.block.mx + 2 * field.block.ngg) * (field.block.my + 2 * field.block.ngg) *
+                    (field.block.mz + 2 * field.block.ngg);
 
-  cudaMemcpy(bv.data(), h_ptr->bv.data(), 6 * size * sizeof(real), cudaMemcpyDeviceToHost);
-  // cudaMemcpy(ov.data(), h_ptr->mach.data(), size * sizeof(real), cudaMemcpyDeviceToHost);
-  // if (parameter.get_int("turbulence_method") == 1 || parameter.get_int("turbulence_method") == 2) {
-  //   cudaMemcpy(ov[1], h_ptr->mut.data(), size * sizeof(real), cudaMemcpyDeviceToHost);
-  // }
-  cudaMemcpy(sv.data(), h_ptr->sv.data(), parameter.get_int("n_scalar") * size * sizeof(real), cudaMemcpyDeviceToHost);
-  // if (parameter.get_int("reaction") == 2 || parameter.get_int("species") == 2) {
-  //   cudaMemcpy(ov[2], h_ptr->scalar_diss_rate.data(), size * sizeof(real), cudaMemcpyDeviceToHost);
-  // }
+  auto copy = [stream, async_copy](void *dst, const void *src, size_t bytes) {
+    if (async_copy) {
+      cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream);
+    } else {
+      cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+    }
+  };
+
+  copy(field.bv.data(), field.h_ptr->bv.data(), 6 * size * sizeof(real));
+  copy(field.sv.data(), field.h_ptr->sv.data(), parameter.get_int("n_scalar") * size * sizeof(real));
   const int n_other_var = parameter.get_int("n_other_var");
   const auto &ov_labels = parameter.get_int_array("ov_labels");
   for (int l = 0; l < n_other_var; ++l) {
     const real *hPtr = nullptr;
     switch (ov_labels[l]) {
       case 51:
-        hPtr = h_ptr->mach.data();
+        hPtr = field.h_ptr->mach.data();
         break;
       case 57:
-        if constexpr (kTwoTemperature) {
-          hPtr = h_ptr->temperature_ve.data();
+        if constexpr (cfd::kTwoTemperature) {
+          hPtr = field.h_ptr->temperature_ve.data();
         }
         break;
       case 58:
-        if constexpr (kTwoTemperature) {
-          hPtr = h_ptr->thermal_conductivity_ve.data();
+        if constexpr (cfd::kTwoTemperature) {
+          hPtr = field.h_ptr->thermal_conductivity_ve.data();
         }
         break;
       case 52:
-        hPtr = h_ptr->mut.data();
+        hPtr = field.h_ptr->mut.data();
         break;
       case 53:
-        // hPtr = h_ptr->fd.data();
         break;
       case 54:
-        hPtr = h_ptr->scalar_diss_rate.data();
+        hPtr = field.h_ptr->scalar_diss_rate.data();
         break;
       case 56:
-        hPtr = h_ptr->shock_sensor.data();
+        hPtr = field.h_ptr->shock_sensor.data();
         break;
       default:
         hPtr = nullptr;
     }
     if (hPtr != nullptr) {
-      cudaMemcpy(ov[l], hPtr, size * sizeof(real), cudaMemcpyDeviceToHost);
+      copy(field.ov[l], hPtr, size * sizeof(real));
     }
   }
 
   if (const int n_rand = parameter.get_int("random_number_per_point"); n_rand > 0) {
-    cudaMemcpy(rng_state.data(), h_ptr->rng_state.data(), n_rand * size * sizeof(real),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(fluc_val.data(), h_ptr->fluc_val.data(),
-               parameter.get_int("fluctuation_variable_number") * size * sizeof(real), cudaMemcpyDeviceToHost);
+    copy(field.rng_state.data(), field.h_ptr->rng_state.data(), n_rand * size * sizeof(real));
+    copy(field.fluc_val.data(), field.h_ptr->fluc_val.data(),
+         parameter.get_int("fluctuation_variable_number") * size * sizeof(real));
   }
 
-  copy_auxiliary_data_from_device(*this, size);
+  // if (async_copy) {
+    // copy_auxiliary_data_from_device_async(field, size, stream);
+  // } else {
+    copy_auxiliary_data_from_device(field, size);
+  // }
+}
+} // namespace
+
+void cfd::Field::copy_data_from_device(const Parameter &parameter) {
+  copy_field_data_from_device_impl(*this, parameter, nullptr, false);
+}
+
+void cfd::Field::copy_data_from_device_async(const Parameter &parameter, cudaStream_t stream) {
+  copy_field_data_from_device_impl(*this, parameter, stream, true);
 }
 
 void cfd::Field::deallocate_memory(const Parameter &parameter) {

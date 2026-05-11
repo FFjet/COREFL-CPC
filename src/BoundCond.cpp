@@ -55,8 +55,8 @@ cfd::Inflow::Inflow(const std::string &inflow_name, Species &spec, Parameter &pa
   if (parameter.get_int("problem_type") == 0 && inflow_type == 2)
     inflow_type = 0;
   if (info.find("fluctuation_type") != info.end()) fluctuation_type = std::get<int>(info.at("fluctuation_type"));
-  if (inflow_type != 2 && fluctuation_type == 11) {
-    // The digital filter is only for mixing layers.
+  if (inflow_type != 2 && fluctuation_type == 11 && parameter.get_int("df_mode") != 2) {
+    // The legacy digital filter path is only for mixing layers. df_mode=2 enables profile-based TBL inflow.
     fluctuation_type = 0;
   }
   if (info.find("inflow_sub") != info.end()) inflow_sub = std::get<int>(info.at("inflow_sub"));

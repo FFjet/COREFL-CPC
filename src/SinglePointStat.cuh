@@ -47,11 +47,20 @@ private:
     bool upper_u_faster = true;
   };
 
+  struct WallStatsRecord {
+    real value[WallStats::n_record]{};
+  };
+
   int n_reyAve = 2;
   int n_reyAveScalar = 0;
   int n_favAve = 4;
   int n_rey2nd = 2;
   int n_fav2nd = 7;
+  int fav2_scalar_var_offset = 7;
+  int fav2_scalar_var_count = 0;
+  int fav2_scalar_flux_u_offset = 7;
+  int fav2_scalar_flux_v_offset = 7;
+  int fav2_scalar_flux_count = 0;
   std::vector<std::string> reyAveVar = {"rho", "p"};
   std::vector<int> reyAveVarIndex = {0, 4};
   std::vector<std::string> reyAveScalar = {};
@@ -69,6 +78,8 @@ private:
   int n_ps = 0;
   bool if_collect_spec_favreAvg = true;
   bool if_collect_2nd_moments = true;
+  bool if_collect_scalar_flux = false;
+  bool if_wall_stats = false;
   bool tke_budget = false;
   bool scalar_fluc_budget = false;
   bool species_velocity_correlation = false;
@@ -80,6 +91,7 @@ private:
   MPI_Offset offset_scalar_fluc_budget{0};
   MPI_Offset offset_species_velocity_correlation{0};
   MPI_Offset offset_species_dissipation_rate{0};
+  MPI_Offset offset_wall_stat{0};
 
   int myid{0};
   int ngg = 1;
@@ -103,6 +115,7 @@ public:
   std::vector<int> counter_rey1st;
   std::vector<int> counter_fav1st;
   std::vector<int> counter_tke_budget;
+  std::vector<int> counter_wall_stat;
 
 private:
   void init_stat_name();
@@ -119,6 +132,10 @@ private:
                                    std::vector<ThicknessRecord> &records) const;
 
   void write_thickness_file(const std::vector<ThicknessRecord> &local_records) const;
+
+  void compute_wall_stats_for_block(int blk, std::vector<WallStatsRecord> &records) const;
+
+  void write_wall_stats_file(const std::vector<WallStatsRecord> &local_records) const;
 
   void plot_statistical_data(DParameter *param) const;
 };

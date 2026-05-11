@@ -47,6 +47,8 @@ struct DParameter {
   int shock_sensor = 0;
   real sensor_eps = -1;        // The eps value for shock sensor
   real sensor_threshold = 0.1; // The criteria for hybrid scheme.
+  real x_sponge_start = 1e+6;
+  real y_sponge_start = 1e+6;
 
   real filter_strength = 0; // The strength of the explicit filter
   int print_nan = 0;
@@ -147,12 +149,17 @@ struct DParameter {
   int n_species_stat = 0;
   bool if_collect_spec_favreAvg = false;
   bool if_collect_2nd_moments = false;
+  bool if_collect_scalar_flux = false;
   bool perform_spanwise_average = false; // If we want to perform spanwise average
+  bool if_wall_stats = false;
   bool rho_p_correlation = false;
   bool stat_tke_budget = false;
   bool stat_scalar_fluc_budget = false;
   bool stat_species_dissipation_rate = false;
   bool stat_species_velocity_correlation = false;
+  int statFavre2ScalarVarOffset = 7;
+  int statFavre2ScalarFluxUOffset = 7;
+  int statFavre2ScalarFluxVOffset = 7;
   int *reyAveVarIndex = nullptr;
   int *reyAveScalarIndex = nullptr;
   int *specStatIndex = nullptr;

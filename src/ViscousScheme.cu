@@ -91,13 +91,13 @@ __global__ void compute_dFv_dx(DZone *zone, const DParameter *param) {
 
   const int nv = param->n_var;
   auto &dq = zone->dq;
-  auto &fv = zone->vis_flux;
-  dq(i, j, k, 1) += fv(i, j, k, 0) - fv(i - 1, j, k, 0);
-  dq(i, j, k, 2) += fv(i, j, k, 1) - fv(i - 1, j, k, 1);
-  dq(i, j, k, 3) += fv(i, j, k, 2) - fv(i - 1, j, k, 2);
-  dq(i, j, k, 4) += fv(i, j, k, 3) - fv(i - 1, j, k, 3);
+  auto &fv = zone->fFlux;
+  dq(i, j, k, 1) += fv(i, j, k, 1) - fv(i - 1, j, k, 1);
+  dq(i, j, k, 2) += fv(i, j, k, 2) - fv(i - 1, j, k, 2);
+  dq(i, j, k, 3) += fv(i, j, k, 3) - fv(i - 1, j, k, 3);
+  dq(i, j, k, 4) += fv(i, j, k, 4) - fv(i - 1, j, k, 4);
   for (int l = 5; l < nv; ++l) {
-    dq(i, j, k, l) += fv(i, j, k, l - 1) - fv(i - 1, j, k, l - 1);
+    dq(i, j, k, l) += fv(i, j, k, l) - fv(i - 1, j, k, l);
   }
 }
 
@@ -109,13 +109,13 @@ __global__ void compute_dGv_dy(DZone *zone, const DParameter *param) {
 
   const int nv = param->n_var;
   auto &dq = zone->dq;
-  auto &gv = zone->vis_flux;
-  dq(i, j, k, 1) += gv(i, j, k, 0) - gv(i, j - 1, k, 0);
-  dq(i, j, k, 2) += gv(i, j, k, 1) - gv(i, j - 1, k, 1);
-  dq(i, j, k, 3) += gv(i, j, k, 2) - gv(i, j - 1, k, 2);
-  dq(i, j, k, 4) += gv(i, j, k, 3) - gv(i, j - 1, k, 3);
+  auto &gv = zone->gFlux;
+  dq(i, j, k, 1) += gv(i, j, k, 1) - gv(i, j - 1, k, 1);
+  dq(i, j, k, 2) += gv(i, j, k, 2) - gv(i, j - 1, k, 2);
+  dq(i, j, k, 3) += gv(i, j, k, 3) - gv(i, j - 1, k, 3);
+  dq(i, j, k, 4) += gv(i, j, k, 4) - gv(i, j - 1, k, 4);
   for (int l = 5; l < nv; ++l) {
-    dq(i, j, k, l) += gv(i, j, k, l - 1) - gv(i, j - 1, k, l - 1);
+    dq(i, j, k, l) += gv(i, j, k, l) - gv(i, j - 1, k, l);
   }
 }
 
@@ -127,13 +127,13 @@ __global__ void compute_dHv_dz(DZone *zone, const DParameter *param) {
 
   const int nv = param->n_var;
   auto &dq = zone->dq;
-  auto &hv = zone->vis_flux;
-  dq(i, j, k, 1) += hv(i, j, k, 0) - hv(i, j, k - 1, 0);
-  dq(i, j, k, 2) += hv(i, j, k, 1) - hv(i, j, k - 1, 1);
-  dq(i, j, k, 3) += hv(i, j, k, 2) - hv(i, j, k - 1, 2);
-  dq(i, j, k, 4) += hv(i, j, k, 3) - hv(i, j, k - 1, 3);
+  auto &hv = zone->hFlux;
+  dq(i, j, k, 1) += hv(i, j, k, 1) - hv(i, j, k - 1, 1);
+  dq(i, j, k, 2) += hv(i, j, k, 2) - hv(i, j, k - 1, 2);
+  dq(i, j, k, 3) += hv(i, j, k, 3) - hv(i, j, k - 1, 3);
+  dq(i, j, k, 4) += hv(i, j, k, 4) - hv(i, j, k - 1, 4);
   for (int l = 5; l < nv; ++l) {
-    dq(i, j, k, l) += hv(i, j, k, l - 1) - hv(i, j, k - 1, l - 1);
+    dq(i, j, k, l) += hv(i, j, k, l) - hv(i, j, k - 1, l);
   }
 }
 
@@ -808,7 +808,7 @@ template<int ORDER> __global__ void compute_viscous_flux_derivative(DZone *zone,
 
   const int nv = param->n_var;
   auto &dq = zone->dq;
-  const auto &fv = zone->fFlux, &gv = zone->gFlux, hv = zone->hFlux;
+  const auto &fv = zone->fFlux, &gv = zone->gFlux, &hv = zone->hFlux;
   const real jac = zone->jac(i, j, k);
 
   dq(i, j, k, 1) += (d_dXi<ORDER>(fv, i, j, k, 1, mx, compute_type[0], compute_type[1])
@@ -906,10 +906,10 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
   const real xi_z_div_jac =
       0.5 * (metric(i, j, k, 2) * zone->jac(i, j, k) + metric(i + 1, j, k, 2) * zone->jac(i + 1, j, k));
 
-  auto &fv = zone->vis_flux;
-  fv(i, j, k, 0) = xi_x_div_jac * tau_xx + xi_y_div_jac * tau_xy + xi_z_div_jac * tau_xz;
-  fv(i, j, k, 1) = xi_x_div_jac * tau_xy + xi_y_div_jac * tau_yy + xi_z_div_jac * tau_yz;
-  fv(i, j, k, 2) = xi_x_div_jac * tau_xz + xi_y_div_jac * tau_yz + xi_z_div_jac * tau_zz;
+  auto &fv = zone->fFlux;
+  fv(i, j, k, 1) = xi_x_div_jac * tau_xx + xi_y_div_jac * tau_xy + xi_z_div_jac * tau_xz;
+  fv(i, j, k, 2) = xi_x_div_jac * tau_xy + xi_y_div_jac * tau_yy + xi_z_div_jac * tau_yz;
+  fv(i, j, k, 3) = xi_x_div_jac * tau_xz + xi_y_div_jac * tau_yz + xi_z_div_jac * tau_zz;
 
   const real um = 0.5 * (pv(i, j, k, 1) + pv(i + 1, j, k, 1));
   const real vm = 0.5 * (pv(i, j, k, 2) + pv(i + 1, j, k, 2));
@@ -925,7 +925,7 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
     conductivity = mul / param->Pr * cp;
   }
 
-  fv(i, j, k, 3) = um * fv(i, j, k, 0) + vm * fv(i, j, k, 1) + wm * fv(i, j, k, 2) +
+  fv(i, j, k, 4) = um * fv(i, j, k, 1) + vm * fv(i, j, k, 2) + wm * fv(i, j, k, 3) +
                    conductivity * (xi_x_div_jac * t_x + xi_y_div_jac * t_y + xi_z_div_jac * t_z);
 
   if constexpr (mix_model != MixtureModel::Air) {
@@ -1008,13 +1008,13 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
         diffusivity[l] * (diffusion_driven_force[l] - mw_tot * yk[l] * sum_GradXi_cdot_GradY_over_wl)
         - yk[l] * CorrectionVelocityTerm
       };
-      fv(i, j, k, 4 + l) = diffusion_flux;
+      fv(i, j, k, 5 + l) = diffusion_flux;
       real h_diff = h[l];
       if constexpr (kTwoTemperature) {
         if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
       }
       // Add the influence of species diffusion on total energy
-      fv(i, j, k, 3) += h_diff * diffusion_flux;
+      fv(i, j, k, 4) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
@@ -1026,12 +1026,12 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
             0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i + 1, j, k));
         const real eve_conduction =
             conductivity_ve * (xi_x_div_jac * tve_x + xi_y_div_jac * tve_y + xi_z_div_jac * tve_z);
-        fv(i, j, k, 3) += eve_conduction;
+        fv(i, j, k, 4) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux += compute_ve_energy(l, tve_m, param) * fv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * fv(i, j, k, 5 + l);
         }
-        fv(i, j, k, 4 + param->i_eve) = eve_flux;
+        fv(i, j, k, 5 + param->i_eve) = eve_flux;
       }
     }
   }
@@ -1053,7 +1053,7 @@ template<MixtureModel mix_model> __global__ void compute_fv_2nd_order(DZone *zon
       const real ps_z = ps_xi * xi_z + ps_eta * eta_z + ps_zeta * zeta_z;
 
       const real rhoD{mul / param->sc_ps[l]};
-      fv(i, j, k, lc - 1) = rhoD * (xi_x_div_jac * ps_x + xi_y_div_jac * ps_y + xi_z_div_jac * ps_z);
+      fv(i, j, k, lc) = rhoD * (xi_x_div_jac * ps_x + xi_y_div_jac * ps_y + xi_z_div_jac * ps_z);
     }
   }
 }
@@ -1134,10 +1134,10 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
   const real eta_z_div_jac =
       0.5 * (metric(i, j, k, 5) * zone->jac(i, j, k) + metric(i, j + 1, k, 5) * zone->jac(i, j + 1, k));
 
-  auto &gv = zone->vis_flux;
-  gv(i, j, k, 0) = eta_x_div_jac * tau_xx + eta_y_div_jac * tau_xy + eta_z_div_jac * tau_xz;
-  gv(i, j, k, 1) = eta_x_div_jac * tau_xy + eta_y_div_jac * tau_yy + eta_z_div_jac * tau_yz;
-  gv(i, j, k, 2) = eta_x_div_jac * tau_xz + eta_y_div_jac * tau_yz + eta_z_div_jac * tau_zz;
+  auto &gv = zone->gFlux;
+  gv(i, j, k, 1) = eta_x_div_jac * tau_xx + eta_y_div_jac * tau_xy + eta_z_div_jac * tau_xz;
+  gv(i, j, k, 2) = eta_x_div_jac * tau_xy + eta_y_div_jac * tau_yy + eta_z_div_jac * tau_yz;
+  gv(i, j, k, 3) = eta_x_div_jac * tau_xz + eta_y_div_jac * tau_yz + eta_z_div_jac * tau_zz;
 
   const real um = 0.5 * (pv(i, j, k, 1) + pv(i, j + 1, k, 1));
   const real vm = 0.5 * (pv(i, j, k, 2) + pv(i, j + 1, k, 2));
@@ -1153,7 +1153,7 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
     conductivity = mul / param->Pr * cp;
   }
 
-  gv(i, j, k, 3) = um * gv(i, j, k, 0) + vm * gv(i, j, k, 1) + wm * gv(i, j, k, 2) +
+  gv(i, j, k, 4) = um * gv(i, j, k, 1) + vm * gv(i, j, k, 2) + wm * gv(i, j, k, 3) +
                    conductivity * (eta_x_div_jac * t_x + eta_y_div_jac * t_y + eta_z_div_jac * t_z);
 
   if constexpr (mix_model != MixtureModel::Air) {
@@ -1235,13 +1235,13 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
         diffusivity[l] * (diffusion_driven_force[l] - mw_tot * yk[l] * sum_GradEta_cdot_GradY_over_wl)
         - yk[l] * CorrectionVelocityTerm
       };
-      gv(i, j, k, 4 + l) = diffusion_flux;
+      gv(i, j, k, 5 + l) = diffusion_flux;
       real h_diff = h[l];
       if constexpr (kTwoTemperature) {
         if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
       }
       // Add the influence of species diffusion on total energy
-      gv(i, j, k, 3) += h_diff * diffusion_flux;
+      gv(i, j, k, 4) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
@@ -1253,12 +1253,12 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
             0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i, j + 1, k));
         const real eve_conduction =
             conductivity_ve * (eta_x_div_jac * tve_x + eta_y_div_jac * tve_y + eta_z_div_jac * tve_z);
-        gv(i, j, k, 3) += eve_conduction;
+        gv(i, j, k, 4) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux += compute_ve_energy(l, tve_m, param) * gv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * gv(i, j, k, 5 + l);
         }
-        gv(i, j, k, 4 + param->i_eve) = eve_flux;
+        gv(i, j, k, 5 + param->i_eve) = eve_flux;
       }
     }
   }
@@ -1280,7 +1280,7 @@ template<MixtureModel mix_model> __global__ void compute_gv_2nd_order(DZone *zon
       const real ps_z = ps_xi * xi_z + ps_eta * eta_z + ps_zeta * zeta_z;
 
       const real rhoD{mul / param->sc_ps[l]};
-      gv(i, j, k, lc - 1) = rhoD * (eta_x_div_jac * ps_x + eta_y_div_jac * ps_y + eta_z_div_jac * ps_z);
+      gv(i, j, k, lc) = rhoD * (eta_x_div_jac * ps_x + eta_y_div_jac * ps_y + eta_z_div_jac * ps_z);
     }
   }
 }
@@ -1358,10 +1358,10 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
   const real zeta_z_div_jac =
       0.5 * (metric(i, j, k, 8) * zone->jac(i, j, k) + metric(i, j, k + 1, 8) * zone->jac(i, j, k + 1));
 
-  auto &hv = zone->vis_flux;
-  hv(i, j, k, 0) = zeta_x_div_jac * tau_xx + zeta_y_div_jac * tau_xy + zeta_z_div_jac * tau_xz;
-  hv(i, j, k, 1) = zeta_x_div_jac * tau_xy + zeta_y_div_jac * tau_yy + zeta_z_div_jac * tau_yz;
-  hv(i, j, k, 2) = zeta_x_div_jac * tau_xz + zeta_y_div_jac * tau_yz + zeta_z_div_jac * tau_zz;
+  auto &hv = zone->hFlux;
+  hv(i, j, k, 1) = zeta_x_div_jac * tau_xx + zeta_y_div_jac * tau_xy + zeta_z_div_jac * tau_xz;
+  hv(i, j, k, 2) = zeta_x_div_jac * tau_xy + zeta_y_div_jac * tau_yy + zeta_z_div_jac * tau_yz;
+  hv(i, j, k, 3) = zeta_x_div_jac * tau_xz + zeta_y_div_jac * tau_yz + zeta_z_div_jac * tau_zz;
 
   const real um = 0.5 * (pv(i, j, k, 1) + pv(i, j, k + 1, 1));
   const real vm = 0.5 * (pv(i, j, k, 2) + pv(i, j, k + 1, 2));
@@ -1377,7 +1377,7 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
     conductivity = mul / param->Pr * cp;
   }
 
-  hv(i, j, k, 3) = um * hv(i, j, k, 0) + vm * hv(i, j, k, 1) + wm * hv(i, j, k, 2) +
+  hv(i, j, k, 4) = um * hv(i, j, k, 1) + vm * hv(i, j, k, 2) + wm * hv(i, j, k, 3) +
                    conductivity * (zeta_x_div_jac * t_x + zeta_y_div_jac * t_y + zeta_z_div_jac * t_z);
 
   if constexpr (mix_model != MixtureModel::Air) {
@@ -1458,13 +1458,13 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
         diffusivity[l] * (diffusion_driven_force[l] - mw_tot * yk[l] * sum_GradZeta_cdot_GradY_over_wl)
         - yk[l] * CorrectionVelocityTerm
       };
-      hv(i, j, k, 4 + l) = diffusion_flux;
+      hv(i, j, k, 5 + l) = diffusion_flux;
       real h_diff = h[l];
       if constexpr (kTwoTemperature) {
         if (param->i_eve >= 0) h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
       }
       // Add the influence of species diffusion on total energy
-      hv(i, j, k, 3) += h_diff * diffusion_flux;
+      hv(i, j, k, 4) += h_diff * diffusion_flux;
     }
 
     if constexpr (kTwoTemperature) {
@@ -1476,12 +1476,12 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
             0.5 * (zone->thermal_conductivity_ve(i, j, k) + zone->thermal_conductivity_ve(i, j, k + 1));
         const real eve_conduction =
             conductivity_ve * (zeta_x_div_jac * tve_x + zeta_y_div_jac * tve_y + zeta_z_div_jac * tve_z);
-        hv(i, j, k, 3) += eve_conduction;
+        hv(i, j, k, 4) += eve_conduction;
         real eve_flux = eve_conduction;
         for (int l = 0; l < n_spec; ++l) {
-          eve_flux += compute_ve_energy(l, tve_m, param) * hv(i, j, k, 4 + l);
+          eve_flux += compute_ve_energy(l, tve_m, param) * hv(i, j, k, 5 + l);
         }
-        hv(i, j, k, 4 + param->i_eve) = eve_flux;
+        hv(i, j, k, 5 + param->i_eve) = eve_flux;
       }
     }
   }
@@ -1503,7 +1503,7 @@ __global__ void compute_hv_2nd_order(DZone *zone, DParameter *param) {
       const real ps_z = ps_xi * xi_z + ps_eta * eta_z + ps_zeta * zeta_z;
 
       const real rhoD{mul / param->sc_ps[l]};
-      hv(i, j, k, lc - 1) = rhoD * (zeta_x_div_jac * ps_x + zeta_y_div_jac * ps_y + zeta_z_div_jac * ps_z);
+      hv(i, j, k, lc) = rhoD * (zeta_x_div_jac * ps_x + zeta_y_div_jac * ps_y + zeta_z_div_jac * ps_z);
     }
   }
 }

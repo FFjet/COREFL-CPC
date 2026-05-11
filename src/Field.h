@@ -9,6 +9,12 @@
 namespace cfd {
 struct Inflow;
 
+namespace WallStats {
+inline constexpr int n_collect = 5; // tau, tau^2, q, q^2, C_f_inst
+inline constexpr int n_derived = 30;
+inline constexpr int n_record = 46;
+}
+
 struct DZone {
   DZone() = default;
 
@@ -61,11 +67,11 @@ struct DZone {
   ggxl::Array3D<real> scalar_diss_rate; // scalar dissipation rate
 
   // Variables used in computation
-  ggxl::VectorField3D<real> dq;       // The residual for flux computing
+  ggxl::VectorField3D<real> dq;    // The residual for flux computing
   ggxl::VectorField3D<real> fFlux; // The fluxes at the cell faces.
   ggxl::VectorField3D<real> gFlux; // The fluxes at the cell faces.
   ggxl::VectorField3D<real> hFlux; // The fluxes at the cell faces.
-  ggxl::VectorField3D<real> vis_flux; // The fluxes at the cell faces.
+  // ggxl::VectorField3D<real> vis_flux; // The fluxes at the cell faces.
   // ggxl::VectorField3D<real> grad_bv;  // The gradient of basic variables
 
   ggxl::VectorField3D<real> dq0;          // Used when DPLUR is enabled
@@ -96,6 +102,7 @@ struct DZone {
   ggxl::VectorField3D<real> collect_reynolds_2nd;
   ggxl::VectorField3D<real> collect_favre_1st;
   ggxl::VectorField3D<real> collect_favre_2nd;
+  ggxl::VectorField2D<real> collect_wall_stat;
   // mean arrays
   ggxl::VectorField3D<real> stat_reynolds_1st;
   ggxl::VectorField3D<real> stat_reynolds_2nd;
@@ -127,6 +134,8 @@ struct Field {
 
   void copy_data_from_device(const Parameter &parameter);
 
+  void copy_data_from_device_async(const Parameter &parameter, cudaStream_t stream);
+
   void deallocate_memory(const Parameter &parameter);
 
   int n_var = 5;
@@ -149,11 +158,13 @@ struct Field {
   ggxl::VectorField3DHost<real> collect_reynolds_2nd;
   ggxl::VectorField3DHost<real> collect_favre_1st;
   ggxl::VectorField3DHost<real> collect_favre_2nd;
+  ggxl::VectorField2DHost<real> collect_wall_stat;
   // mean arrays
   ggxl::VectorField3DHost<real> stat_reynolds_1st;
   ggxl::VectorField3DHost<real> stat_reynolds_2nd;
   ggxl::VectorField3DHost<real> stat_favre_1st;
   ggxl::VectorField3DHost<real> stat_favre_2nd;
+  ggxl::VectorField3DHost<real> stat_wall_derived;
 
   // other statistical variables
   ggxl::VectorField3DHost<real> collect_tke_budget;

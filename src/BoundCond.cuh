@@ -75,6 +75,18 @@ struct DBoundCond {
 
   // Digital filter related
   int n_df_face = 0;
+  int df_mode = 1; // 1 - mixing layer; 2 - Touber turbulent boundary layer.
+  real df_velocity_scale = 1;
+  real df_y_zone_threshold = 1;
+  real df_y_zone_width = 0.03;     // smooth inner/outer blending width in y/delta
+  real df_Lx[3] = {10, 4, 4};      // streamwise integral length scales for u/v/w perturbation fields
+  real df_Ly_inner[3] = {1, 1, 1}; // wall-normal integral length scales in the inner zone
+  real df_Ly_outer[3] = {1, 1, 1}; // wall-normal integral length scales in the outer zone
+  real df_Lz_inner[3] = {1, 1, 1}; // spanwise integral length scales in the inner zone
+  real df_Lz_outer[3] = {1, 1, 1}; // spanwise integral length scales in the outer zone
+  real df_sra_coefficient = 1.0;   // coefficient in total-enthalpy/SRA thermal fluctuation closure
+  int df_diagnostic_interval = 0;  // <=0 disables DF diagnostic files
+  int df_fluctuation_component = 3;
   std::vector<int> df_label = {};
   std::vector<int> df_related_block = {};
   constexpr static int DF_N = 50;
@@ -84,8 +96,8 @@ struct DBoundCond {
   ggxl::VectorField2D<real> *random_values_dPtr = nullptr;
   ggxl::VectorField1D<real> *df_lundMatrix_dPtr = nullptr; // Lund matrix for digital filter
   // (0:my-1, 0:2*DF_N, 0:2): my*(2N+1)*3, the second index jj corresponds to jj-N
-  ggxl::VectorField2D<real> *df_by_dPtr = nullptr;
-  ggxl::VectorField2D<real> *df_bz_dPtr = nullptr;
+  ggxl::VectorField3D<real> *df_by_dPtr = nullptr;
+  ggxl::VectorField3D<real> *df_bz_dPtr = nullptr;
   ggxl::VectorField2D<curandState> *rng_states_hPtr = nullptr; // Random number generator states for digital filter
   ggxl::VectorField2D<curandState> *rng_states_dPtr = nullptr; // Random number generator states for digital filter
   ggxl::VectorField2D<real> *df_fy_dPtr = nullptr;
@@ -104,20 +116,30 @@ private:
 
   void initialize_df_memory(const Mesh &mesh, const std::vector<int> &N1, const std::vector<int> &N2);
 
+  bool read_df(Parameter &parameter, const Mesh &mesh, const std::vector<int> &N1, const std::vector<int> &N2) const;
+
   void get_digital_filter_lund_matrix(Parameter &parameter, const std::vector<int> &N1,
     const std::vector<std::vector<real>> &scaled_y) const;
 
-  void get_digital_filter_convolution_kernel(Parameter &parameter, const std::vector<int> &N1,
-    const std::vector<std::vector<real>> &y_scaled, real dz) const;
+  void get_digital_filter_convolution_kernel(Parameter &parameter, const std::vector<std::vector<real>> &y_scaled,
+    const std::vector<std::vector<real>> &y_ext, const std::vector<std::vector<real>> &z_coord,
+    const std::vector<int> &N1, const std::vector<int> &N2, const std::vector<real> &z_period, real dz) const;
 
   void generate_random_numbers(int iFace, int my, int mz, int ngg) const;
 
   void apply_convolution(int iFace, int my, int mz, int ngg) const;
 
+  void apply_convolution_tbl(int iFace, int my, int mz, int ngg) const;
+
   void initialize_profile_and_rng(Parameter &parameter, Mesh &mesh, const Species &species, std::vector<Field> &field);
 
   void compute_fluctuations(const DParameter *param, DZone *zone, const Inflow *inflowHere, int iFace, int my, int mz,
     int ngg) const;
+
+  void compute_fluctuations_tbl(const DParameter *param, DZone *zone, const Inflow *inflowHere,
+    ggxl::VectorField3D<real> *profile_dPtr, int iFace, int my, int mz, int ngg) const;
+
+  void diagnose_digital_filter_tbl(const Block &block, int df_iFace, int step) const;
 };
 
 void count_boundary_of_type_bc(const std::vector<Boundary> &boundary, int n_bc, int **sep, int blk_idx, int n_block,

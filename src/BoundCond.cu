@@ -498,8 +498,8 @@ void DBoundCond::link_bc_to_boundaries(Mesh &mesh, std::vector<Field> &field) co
   //        auto &b = mesh[i].boundary[wall_info[l].boundary[m].y];
   //        for (int q = 0; q < 3; ++q) {
   //          if (q == b.face) continue;
-  //          b.range_start[q] += ngg;
-  //          b.range_end[q] -= ngg;
+  //          b.range_start[q] += mesh.ngg;
+  //          b.range_end[q] -= mesh.ngg;
   //        }
   //      }
   //    }
@@ -1159,6 +1159,8 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
   if (!file_in.is_open()) {
     printf("Cannot open file %s\n", file.c_str());
     MpiParallel::exit();
+  } else {
+    printf("\t\tReading file %s\n", file.c_str());
   }
   const int direction = boundary.face;
   const int n_spec = species.n_spec;
@@ -1248,6 +1250,7 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
       }
     }
   }
+  // printf("Finished reading the profile from file %s\n", file.c_str());
 
   const int n_var = parameter.get_int("n_var");
   const int n_scalar = parameter.get_int("n_scalar");
@@ -1258,6 +1261,7 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
       range_k[2]{-ngg, block.mz + ngg - 1};
   if (direction == 0) {
     // i direction
+    printf("\t\tMatch the profile for x direction.\n");
     const bool bigNumberFace = boundary.direction == 1;
     if (bigNumberFace) {
       range_i[0] = block.mx - 1;
@@ -1571,6 +1575,7 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
                cudaMemcpyHostToDevice);
     profile_to_match.deallocate_memory();
   }
+  printf("\t\tFinished processing the profile from file %s\n", file.c_str());
 }
 
 __global__ void initialize_rng(curandState *rng_states, int size, int64_t time_stamp) {
@@ -3052,6 +3057,86 @@ template<MixtureModel mix_model> __global__ void apply_inflow_df(DZone *zone, In
   }
 }
 
+template<MixtureModel mix_model> __global__ void apply_inflow_df_tbl(DZone *zone, Inflow *inflow, DParameter *param,
+  ggxl::VectorField3D<real> *profile_dPtr, ggxl::VectorField3D<real> *fluctuation_dPtr, int df_iFace, int i_face,
+  real velocity_scale, real sra_coefficient) {
+  const int ngg = zone->ngg;
+  const int j = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) - ngg;
+  const int k = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y) - ngg;
+  if (j >= zone->my + ngg || k >= zone->mz + ngg) return;
+
+  const auto &b = zone->boundary[i_face];
+  if (b.face != 0) return;
+
+  auto &bv = zone->bv;
+  auto &sv = zone->sv;
+  const auto &prof = profile_dPtr[inflow->profile_idx];
+  const auto &fluc = fluctuation_dPtr[df_iFace];
+
+  const int i_face_idx = b.direction == 1 ? zone->mx - 1 : 0;
+  const real u_fluc = fluc(0, j, k, 0) * velocity_scale;
+  const real v_fluc = fluc(0, j, k, 1) * velocity_scale;
+  const real w_fluc = fluc(0, j, k, 2) * velocity_scale;
+
+  for (int ig = 0; ig <= ngg; ++ig) {
+    const int gi = i_face_idx + ig * b.direction;
+    const int prof_i = -ig;
+
+    const real rho_mean = prof(prof_i, j, k, 0);
+    const real u_mean = prof(prof_i, j, k, 1);
+    const real v_mean = prof(prof_i, j, k, 2);
+    const real w_mean = prof(prof_i, j, k, 3);
+    const real p_mean = prof(prof_i, j, k, 4);
+    const real T_mean = prof(prof_i, j, k, 5);
+
+    real sv_b[MAX_SPEC_NUMBER + 4 + MAX_PASSIVE_SCALAR_NUMBER];
+    for (int l = 0; l < param->n_scalar; ++l) {
+      sv_b[l] = prof(prof_i, j, k, 6 + l);
+    }
+
+    real c_p = 0;
+    if constexpr (mix_model != MixtureModel::Air) {
+      real cpl[MAX_SPEC_NUMBER];
+      compute_cp(T_mean, cpl, param);
+      for (int l = 0; l < param->n_spec; ++l) {
+        c_p += cpl[l] * sv_b[l];
+      }
+    } else {
+      c_p = gamma_air * R_air / (gamma_air - 1);
+    }
+    if (c_p < 1e-30) c_p = 1e-30;
+
+    // Total-enthalpy/SRA thermal fluctuation closure.
+    // This reduces to Touber's streamwise SRA form when the mean crossflow components are negligible:
+    //   T' = - C_T (u_bar u' + v_bar v' + w_bar w') / cp.
+    const real velocity_dot_fluctuation = u_mean * u_fluc + v_mean * v_fluc + w_mean * w_fluc;
+    real T = T_mean - sra_coefficient * velocity_dot_fluctuation / c_p;
+    if (T <= 0.01 * T_mean) T = 0.01 * T_mean;
+
+    real R_mix = R_air;
+    if constexpr (mix_model != MixtureModel::Air) {
+      R_mix = 0;
+      for (int l = 0; l < param->n_spec; ++l) {
+        R_mix += sv_b[l] * param->gas_const[l];
+      }
+      if (R_mix < 1e-30) R_mix = 1e-30;
+    }
+    real rho = p_mean / (R_mix * T);
+    if (rho <= 0.01 * rho_mean) rho = 0.01 * rho_mean;
+
+    bv(gi, j, k, 0) = rho;
+    bv(gi, j, k, 1) = u_mean + u_fluc;
+    bv(gi, j, k, 2) = v_mean + v_fluc;
+    bv(gi, j, k, 3) = w_mean + w_fluc;
+    bv(gi, j, k, 4) = p_mean;
+    bv(gi, j, k, 5) = T;
+    for (int l = 0; l < param->n_scalar; ++l) {
+      sv(gi, j, k, l) = sv_b[l];
+    }
+    compute_cv_from_bv_1_point<mix_model>(zone, param, gi, j, k);
+  }
+}
+
 template<MixtureModel mix_model> __global__ void apply_wall(DZone *zone, Wall *wall, DParameter *param, int i_face,
   int step = -1) {
   const int ngg = zone->ngg;
@@ -3903,13 +3988,22 @@ template<MixtureModel mix_model> void DBoundCond::apply_boundary_conditions(cons
           continue;
         }
         int my = block.my, mz = block.mz, ngg = block.ngg;
-        generate_random_numbers(df_label[l], my, mz, ngg);
-        apply_convolution(df_label[l], my, mz, ngg);
-        compute_fluctuations(param, field.d_ptr, &inflow[l], df_label[l], my, mz, ngg);
         dim3 TPB{32, 8};
         dim3 BPG{(my + 2 * ngg - 1) / TPB.x + 1, (mz + 2 * ngg - 1) / TPB.y + 1};
-        apply_inflow_df<mix_model> <<<BPG, TPB>>>(field.d_ptr, &inflow[l], param, fluctuation_dPtr,
-                                                  df_label[l]);
+        generate_random_numbers(df_label[l], my, mz, ngg);
+        if (df_mode == 2) {
+          apply_convolution_tbl(df_label[l], my, mz, ngg);
+          compute_fluctuations_tbl(param, field.d_ptr, &inflow[l], profile_dPtr_withGhost, df_label[l], my, mz, ngg);
+          diagnose_digital_filter_tbl(block, df_label[l], step);
+          apply_inflow_df_tbl<mix_model> <<<BPG, TPB>>>(field.d_ptr, &inflow[l], param, profile_dPtr_withGhost,
+                                                        fluctuation_dPtr, df_label[l], i_face, df_velocity_scale,
+                                                        df_sra_coefficient);
+        } else {
+          apply_convolution(df_label[l], my, mz, ngg);
+          compute_fluctuations(param, field.d_ptr, &inflow[l], df_label[l], my, mz, ngg);
+          apply_inflow_df<mix_model> <<<BPG, TPB>>>(field.d_ptr, &inflow[l], param, fluctuation_dPtr,
+                                                    df_label[l]);
+        }
       }
     } else {
       for (size_t i = 0; i < nb; i++) {
