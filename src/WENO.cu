@@ -1612,9 +1612,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
   // if (if_shock) {
   eps_ref = eps_weno * param->weno_eps_scale; // * 0.25 * (kxJ * kxJ + kyJ * kyJ + kzJ * kzJ);
   // }
-  real kx = 0.5 * (zone->metric(i, j, k, 3) + zone->metric(i + 1, j, k, 3));
-  real ky = 0.5 * (zone->metric(i, j, k, 4) + zone->metric(i + 1, j, k, 4));
-  real kz = 0.5 * (zone->metric(i, j, k, 5) + zone->metric(i + 1, j, k, 5));
+  real kx = 0.5 * (zone->metric(i, j, k, 3) + zone->metric(i, j + 1, k, 3));
+  real ky = 0.5 * (zone->metric(i, j, k, 4) + zone->metric(i, j + 1, k, 4));
+  real kz = 0.5 * (zone->metric(i, j, k, 5) + zone->metric(i, j + 1, k, 5));
 
   if (const auto sch = param->inviscid_scheme; sch == 51 || sch == 71) {
     auto fp = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s);
@@ -2277,9 +2277,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
   // if (if_shock) {
   eps_ref = eps_weno * param->weno_eps_scale; // * 0.25 * (kxJ * kxJ + kyJ * kyJ + kzJ * kzJ);
   // }
-  real kx = 0.5 * (zone->metric(i, j, k, 6) + zone->metric(i + 1, j, k, 6));
-  real ky = 0.5 * (zone->metric(i, j, k, 7) + zone->metric(i + 1, j, k, 7));
-  real kz = 0.5 * (zone->metric(i, j, k, 8) + zone->metric(i + 1, j, k, 8));
+  real kx = 0.5 * (zone->metric(i, j, k, 6) + zone->metric(i, j, k + 1, 6));
+  real ky = 0.5 * (zone->metric(i, j, k, 7) + zone->metric(i, j, k + 1, 7));
+  real kz = 0.5 * (zone->metric(i, j, k, 8) + zone->metric(i, j, k + 1, 8));
 
   if (const auto sch = param->inviscid_scheme; sch == 51 || sch == 71) {
     auto fp = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s);

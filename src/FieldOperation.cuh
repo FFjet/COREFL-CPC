@@ -11,7 +11,7 @@
 
 namespace cfd {
 __device__ void compute_temperature_and_pressure(int i, int j, int k, const DParameter *param, DZone *zone,
-  real total_energy);
+  real total_energy, bool skip_tve_inversion_if_consistent = false, bool trust_tve_consistent = false);
 
 __device__ __forceinline__ bool is_physical_boundary_cell(const DZone *zone, int i, int j, int k) {
   if (i == 0 && zone->bType_il(j, k) != 0) return true;
@@ -45,12 +45,16 @@ __device__ __forceinline__ void sync_two_temperature_state_from_sv(DZone *zone, 
     if (!isfinite(eve) || eve <= 0.0) {
       eve = compute_mixture_ve_energy(tve, y, param);
     } else {
-      const real tve_from_eve = invert_tve_from_eve(eve, y, tve, param);
-      if (isfinite(tve_from_eve) && tve_from_eve > 0.0 && tve_from_eve <= max_reasonable_guess) {
-        tve = tve_from_eve;
-      } else {
-        tve = t;
-        eve = compute_mixture_ve_energy(tve, y, param);
+      constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
+      const real eve_from_tve = compute_mixture_ve_energy(tve, y, param);
+      if (abs(eve_from_tve - eve) >= tolerance * max(static_cast<real>(1.0), abs(eve))) {
+        const real tve_from_eve = invert_tve_from_eve(eve, y, tve, param);
+        if (isfinite(tve_from_eve) && tve_from_eve > 0.0 && tve_from_eve <= max_reasonable_guess) {
+          tve = tve_from_eve;
+        } else {
+          tve = t;
+          eve = compute_mixture_ve_energy(tve, y, param);
+        }
       }
     }
     zone->temperature_ve(i, j, k) = tve;
@@ -69,21 +73,22 @@ __device__ __forceinline__ void apply_vt_relaxation_1_point(DZone *zone, const D
 
     const real tve = zone->temperature_ve(i, j, k) > 0.0 ? zone->temperature_ve(i, j, k) :
                      max(zone->bv(i, j, k, 5), static_cast<real>(1.0));
+    if (zone->bv(i, j, k, 5) == tve) return;
+
     real y[MAX_SPEC_NUMBER];
     gather_species_mass_fractions(sv, i, j, k, param, y);
-    real ev_eq{}, tau_eff{};
-    compute_vt_relaxation_source(density, zone->bv(i, j, k, 5), tve, y, param, &ev_eq, &tau_eff);
+    real ev_eq{}, tau_eff{}, ev_old{};
+    compute_vt_relaxation_source(density, zone->bv(i, j, k, 5), tve, y, param, &ev_eq, &tau_eff, &ev_old);
     if (tau_eff >= 1e29 || !isfinite(tau_eff)) return;
 
     const real rho_eve_old = max(cv(i, j, k, 5 + param->i_eve), static_cast<real>(0.0));
     const real alpha = exp(-dt_stage / max(tau_eff, static_cast<real>(1e-30)));
-    const real ev_old = compute_mixture_vib_energy(tve, y, param);
     const real ev_new = ev_old * alpha + ev_eq * (1.0 - alpha);
     const real rho_eve_new = rho_eve_old + density * (ev_new - ev_old);
     cv(i, j, k, 5 + param->i_eve) = max(rho_eve_new, static_cast<real>(0.0));
     sv(i, j, k, param->i_eve) = cv(i, j, k, 5 + param->i_eve) / density;
     zone->temperature_ve(i, j, k) = invert_tve_from_eve(sv(i, j, k, param->i_eve), y, tve, param);
-    compute_temperature_and_pressure(i, j, k, param, zone, cv(i, j, k, 4));
+    compute_temperature_and_pressure(i, j, k, param, zone, cv(i, j, k, 4), true, true);
   }
 }
 
@@ -96,8 +101,8 @@ template<MixtureModel mixture_model> __device__ __forceinline__ void compute_tot
   if constexpr (mixture_model != MixtureModel::Air) {
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        real enthalpy[MAX_SPEC_NUMBER], cp[MAX_SPEC_NUMBER];
-        compute_enthalpy_and_cp(bv(i, j, k, 5), enthalpy, cp, param);
+        real enthalpy[MAX_SPEC_NUMBER];
+        compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
         real y[MAX_SPEC_NUMBER];
         gather_species_mass_fractions(zone->sv, i, j, k, param, y);
         for (auto l = 0; l < param->n_spec; l++) {
@@ -206,23 +211,42 @@ template<MixtureModel mix_model> __global__ void update_physical_properties(DZon
     const real R = R_u * imw; // R = R_u / mw
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        real cv_tr{}, cp_tr{}, r_mix{};
-        real y[MAX_SPEC_NUMBER];
-        gather_species_mass_fractions(yk, i, j, k, param, y);
-        compute_mixture_tr_energy(temperature, y, param, &cv_tr, &cp_tr, &r_mix);
+        constexpr real trace_mass_fraction_cutoff = static_cast<real>(1e-20);
+        real cv_ve_eq = 0.0;
+        for (int l = 0; l < n_spec; ++l) {
+          const real yi = yk(i, j, k, l);
+          if (abs(yi) <= trace_mass_fraction_cutoff) continue;
+          const real cv_ve_l = compute_ve_cv(l, temperature, param);
+          cv_ve_eq += yi * cv_ve_l;
+        }
+        const real cp_mix_tr = temp;
+        const real cp_tr = cp_mix_tr - cv_ve_eq;
+        const real cv_tr = cp_mix_tr - R - cv_ve_eq;
         const real gamma = cp_tr / max(cv_tr, static_cast<real>(1e-8));
         zone->gamma(i, j, k) = gamma;
-        const real a = sqrt(max(gamma * r_mix * temperature, static_cast<real>(1e-12)));
+        const real a = sqrt(max(gamma * R * temperature, static_cast<real>(1e-12)));
         zone->acoustic_speed(i, j, k) = a;
         zone->mach(i, j, k) = V / a;
         if (zone->temperature_ve(i, j, k) <= 0) {
           zone->temperature_ve(i, j, k) = temperature;
         }
         compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
-        real cv_ve{};
-        compute_mixture_ve_energy(zone->temperature_ve(i, j, k), y, param, &cv_ve);
+        const real conductivity_eq = zone->thermal_conductivity(i, j, k);
+        zone->thermal_conductivity(i, j, k) =
+            conductivity_eq * max(cp_tr, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
+        real cv_ve = cv_ve_eq;
+        if (zone->temperature_ve(i, j, k) != temperature) {
+          cv_ve = 0.0;
+          const real temperature_ve = zone->temperature_ve(i, j, k);
+          for (int l = 0; l < n_spec; ++l) {
+            const real yi = yk(i, j, k, l);
+            if (abs(yi) > trace_mass_fraction_cutoff) {
+              cv_ve += yi * compute_ve_cv(l, temperature_ve, param);
+            }
+          }
+        }
         zone->thermal_conductivity_ve(i, j, k) =
-            zone->thermal_conductivity(i, j, k) * cv_ve / max(temp, static_cast<real>(1e-8));
+            conductivity_eq * max(cv_ve, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
       } else {
         temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
         zone->gamma(i, j, k) = temp;         // gamma = cp / cv
@@ -256,8 +280,8 @@ template<MixtureModel mixture_model> __device__ __forceinline__ real compute_tot
   if constexpr (mixture_model != MixtureModel::Air) {
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        real enthalpy[MAX_SPEC_NUMBER], cp[MAX_SPEC_NUMBER];
-        compute_enthalpy_and_cp(bv(i, j, k, 5), enthalpy, cp, param);
+        real enthalpy[MAX_SPEC_NUMBER];
+        compute_enthalpy(bv(i, j, k, 5), enthalpy, param);
         real y[MAX_SPEC_NUMBER];
         gather_species_mass_fractions(sv, i, j, k, param, y);
         for (auto l = 0; l < param->n_spec; l++) {

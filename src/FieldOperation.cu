@@ -2,7 +2,7 @@
 
 namespace cfd {
 __device__ void compute_temperature_and_pressure(int i, int j, int k, const DParameter *param, DZone *zone,
-  real total_energy) {
+  real total_energy, bool skip_tve_inversion_if_consistent, bool trust_tve_consistent) {
   const int n_spec = param->n_spec;
   auto &Y = zone->sv;
   auto &bv = zone->bv;
@@ -28,7 +28,17 @@ __device__ void compute_temperature_and_pressure(int i, int j, int k, const DPar
       real eve = max(zone->sv(i, j, k, param->i_eve), static_cast<real>(0.0));
       real tve = zone->temperature_ve(i, j, k);
       if (tve <= 0) tve = max(bv(i, j, k, 5), static_cast<real>(1.0));
-      tve = invert_tve_from_eve(eve, y, tve, param);
+      if (trust_tve_consistent) {
+        // The caller has just updated Tve from this Eve value.
+      } else if (!skip_tve_inversion_if_consistent) {
+        tve = invert_tve_from_eve(eve, y, tve, param);
+      } else {
+        constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
+        const real eve_from_tve = compute_mixture_ve_energy(tve, y, param);
+        if (abs(eve_from_tve - eve) >= tolerance * max(static_cast<real>(1.0), abs(eve))) {
+          tve = invert_tve_from_eve(eve, y, tve, param);
+        }
+      }
       const real max_reasonable_tve = max(static_cast<real>(1.0e7), static_cast<real>(1000.0) *
                                                                   max(bv(i, j, k, 5), static_cast<real>(1.0)));
       if (!isfinite(eve) || !isfinite(tve) || tve <= 0.0 || tve > max_reasonable_tve) {

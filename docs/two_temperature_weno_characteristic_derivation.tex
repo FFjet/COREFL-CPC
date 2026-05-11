@@ -1,0 +1,1317 @@
+\documentclass[11pt,a4paper,fontset=fandol]{ctexart}
+
+\usepackage[margin=22mm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{array,longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{seqsplit}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  citecolor=blue!55!black
+}
+
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ve}{ve}
+\newcommand{\tr}{tr}
+\newcommand{\kk}{\bm{k}}
+\newcommand{\nn}{\bm{n}}
+\newcommand{\uu}{\bm{u}}
+\newcommand{\zz}{\bm{z}}
+\newcommand{\QQ}{\bm{Q}}
+\newcommand{\FF}{\bm{F}}
+\newcommand{\RR}{\bm{R}}
+\newcommand{\LL}{\bm{L}}
+\newcommand{\Gammaone}{\Gamma}
+\newcommand{\Tmode}{\mathcal{T}}
+\newcommand{\Mve}{\mathcal{M}_{\ve}}
+\newcommand{\code}[1]{\texttt{\seqsplit{#1}}}
+
+\title{COREFL 双温无粘通量雅可比、特征 WENO 与源码审查}
+\author{COREFL 双温实现审查文档}
+\date{2026-05-11}
+
+\begin{document}
+\sloppy
+\maketitle
+
+\section{审查范围与参考}
+
+本文审查 COREFL 双温模式下的有限差分无粘通量、特征 WENO 投影、振动--电子能量方程、源项和粘性项。
+对照来源包括 SU2 v7 NEMO thermochemical nonequilibrium 文档、仓库内
+\texttt{化学反应流动无粘通量雅可比矩阵及其特征向量.pdf}，
+以及当前源码。
+仓库内 \texttt{无粘通量离散.pdf} 目前无法被 \texttt{pdfinfo} 正常解析，
+其 WENO 部分不纳入公式核对依据；具体算法以可读的雅可比 PDF、
+SU2 方程和当前 \texttt{src/WENO.cu} 为准。
+
+SU2 v7 的 NEMO 文档给出的双温热力学核心为
+\[
+\rho e^{\ve}=\sum_s \rho_s\left(e_s^{vib}+e_s^{el}\right),
+\]
+并给出 Landau--Teller/Park 形式的振动--电子松弛源
+\[
+\dot\Theta^{\tr:\ve}
+=\sum_s \rho_s \frac{e_s^{\ve *}-e_s^{\ve}}{\tau_s}.
+\]
+同页还写出物种扩散通量、各能量模态 Fourier 热通量
+\[
+\bm{q}^{k}=\kappa^k \nabla T^k,
+\]
+以及 Eucken 形式中
+\(\kappa_s^{\tr}\) 和 \(\kappa_s^{\ve}\) 应分开计算。
+这些式子是本文粘性项和源项审查的准则。
+
+\section{守恒变量与双温能量拆分}
+
+COREFL 的双温版本通过编译期开关
+\code{COREFL\_ENABLE\_TWO\_TEMPERATURE} 选择，并在设备代码中用
+\texttt{if constexpr (kTwoTemperature)} 裁剪路径。
+有限差分通量使用的守恒变量写为
+\[
+\QQ =
+\begin{bmatrix}
+\rho & \rho u & \rho v & \rho w & \rho E &
+\rho\phi_1 & \cdots & \rho\phi_M
+\end{bmatrix}^{T}.
+\]
+其中 transported scalars 为
+\[
+\phi_a \in \{Y_1,\ldots,Y_{N_s},E_{\ve},\ldots\}.
+\]
+在双温有限率化学路径中，
+\[
+i_{\ve}=N_s,\qquad i_{\ve}^{cv}=5+N_s,
+\]
+即 \texttt{Eve} 是物种之后的第一个 transported scalar，
+守恒量为
+\[
+Q_{5+i_{\ve}}=\rho E_{\ve}.
+\]
+\texttt{Tve} 只保存在辅助数组和输出变量中，不是独立守恒变量。
+本文后续把 \(E_{\ve}\) 始终视为守恒变量中的独立比能标量：
+\[
+E_{\ve}=\frac{q_{\ve}}{\rho},\qquad q_{\ve}=Q_{5+i_{\ve}}.
+\]
+它不写作 \(T\) 或 \(T_{\ve}\) 的函数。\(T_{\ve}\) 是为了计算
+化学源、VT 松弛和粘性扩散而从 \(E_{\ve}\) 与组分反解出的辅助温度。
+
+\subsection{\texorpdfstring{模态能量映射与 \(E_{\ve}\leftrightarrow T_{\ve}\)}{模态能量映射与 Eve-Tve}}
+
+代码中的物种振动--电子模态能量求值函数记为
+\(\varepsilon_{\ve,s}(\Tmode)\)。这里的 \(\Tmode\) 是求值温度，不是
+守恒变量。它定义为
+\[
+\varepsilon_{\ve,s}(\Tmode)=\varepsilon_{vib,s}(\Tmode)+\varepsilon_{el,s}(\Tmode).
+\]
+若物种给出了特征振动温度 \(\theta_{v,s}>0\)，则
+\[
+\varepsilon_{vib,s}(\Tmode)=
+R_s\frac{\theta_{v,s}}{\exp(\theta_{v,s}/\Tmode)-1},
+\]
+\[
+c_{v,vib,s}(\Tmode)=
+R_s
+\frac{(\theta_{v,s}/\Tmode)^2\exp(\theta_{v,s}/\Tmode)}
+{\left[\exp(\theta_{v,s}/\Tmode)-1\right]^2}.
+\]
+若 \(\theta_{v,s}\le0\)，代码令该物种振动能为零。
+
+电子能级按配分函数计算。设电子能级温度和简并度为
+\(\theta_{el,sj},g_{sj}\)，
+\[
+Z_{el,s}(\Tmode)=\sum_j g_{sj}\exp(-\theta_{el,sj}/\Tmode),
+\]
+\[
+\varepsilon_{el,s}(\Tmode)=
+R_s\frac{\sum_jg_{sj}\theta_{el,sj}
+\exp(-\theta_{el,sj}/\Tmode)}
+{Z_{el,s}(\Tmode)},
+\]
+\[
+c_{v,el,s}(\Tmode)=
+\frac{R_s}{\Tmode^2}
+\left[
+\frac{\sum_jg_{sj}\theta_{el,sj}^2
+\exp(-\theta_{el,sj}/\Tmode)}{Z_{el,s}(\Tmode)}
+-\left(
+\frac{\sum_jg_{sj}\theta_{el,sj}
+\exp(-\theta_{el,sj}/\Tmode)}{Z_{el,s}(\Tmode)}
+\right)^2
+\right],
+\]
+因此
+\[
+c_{v,\ve,s}(\Tmode)=c_{v,vib,s}(\Tmode)+c_{v,el,s}(\Tmode).
+\]
+
+定义混合物模态能量映射
+\[
+\Mve(\Theta,Y)=\sum_sY_s\varepsilon_{\ve,s}(\Theta).
+\]
+辅助温度 \(T_{\ve}\) 由隐式关系
+\[
+\boxed{\Mve(T_{\ve},Y)=E_{\ve}}.
+\]
+确定。给定守恒标量 \(E_{\ve}\) 和组分 \(Y\)，代码通过 Newton 迭代求
+\[
+T_{\ve}=\Mve^{-1}(E_{\ve};Y).
+\]
+反过来，如果边界、初场或 restart 只给出 \(T_{\ve}\)，代码先用同一个映射
+\[
+E_{\ve}\leftarrow \Mve(T_{\ve},Y)
+\]
+初始化守恒标量。该赋值属于初始化/同步步骤；在无粘特征推导中
+\(E_{\ve}\) 是独立 transported scalar，压力微分不对 \(T_{\ve}\) 求导。
+
+\subsection{NASA 单温热力学拆分}
+
+NASA 单温热力学给出的平衡内能为
+\[
+e_{eq,s}(T)=h_{eq,s}(T)-R_sT .
+\]
+它包含该 NASA 拟合所代表的平衡振动--电子贡献。为了在双温状态退化为
+热平衡、即 \(T_{\ve}=T\) 且守恒 VE 标量取混合物平衡模态能量值时恢复
+NASA 单温热力学，必须从
+\(e_{eq,s}(T)\) 中减去同一个平衡温度 \(T\) 下的
+\(\varepsilon_{\ve,s}(T)\)，定义平动--转动部分
+\[
+e_{\tr,s}(T)=e_{eq,s}(T)-\varepsilon_{\ve,s}(T)
+=h_{eq,s}(T)-R_sT-\varepsilon_{\ve,s}(T).
+\]
+式中的 \(\varepsilon_{\ve,s}(T)\) 是 NASA 单温热力学拆分时在平衡温度
+\(T\) 下的模态能量求值；它不是守恒变量 \(E_{\ve}\)。双温物种内能可写为
+\[
+e_s=e_{\tr,s}(T)+\varepsilon_{\ve,s}(T_{\ve}),
+\]
+但混合物总能量闭合在守恒变量层面写成
+\[
+E=K+\sum_sY_s e_{\tr,s}(T)+E_{\ve},
+\qquad
+K=\frac{1}{2}(u^2+v^2+w^2).
+\]
+这对应 \texttt{src/Thermo.cu} 中
+\code{compute\_mixture\_tr\_energy} 和
+\texttt{src/FieldOperation.cuh} 中的总能量构造：源码先从
+\(h_{eq,s}(T)-R_sT\) 中减去 \(\varepsilon_{\ve,s}(T)\)，再加上独立守恒标量
+\texttt{Eve}。
+
+\section{曲线坐标无粘通量}
+
+令度量方向为
+\[
+\kk=(k_x,k_y,k_z)^T,\qquad |\kk|=\sqrt{k_x^2+k_y^2+k_z^2},
+\qquad \nn=\frac{\kk}{|\kk|},
+\]
+反变速度为
+\[
+U_k=\kk\cdot\uu=k_xu+k_yv+k_zw .
+\]
+无粘通量为
+\[
+\FF_k(\QQ)=
+\begin{bmatrix}
+\rho U_k\\
+\rho uU_k+k_xp\\
+\rho vU_k+k_yp\\
+\rho wU_k+k_zp\\
+(\rho E+p)U_k\\
+\rho\phi_1U_k\\
+\vdots\\
+\rho\phi_MU_k
+\end{bmatrix}.
+\]
+因此双温标量无粘通量严格为
+\[
+F_{\rho E_{\ve}}^{inv}=\rho E_{\ve}U_k .
+\]
+在 \texttt{src/WENO.cu} 和 Roe/HLLC/AUSM 路径中，标量通量均按
+\(\rho\phi_a U_k\) 处理；当 \(a=i_{\ve}\) 时即为上式。
+
+\section{压力微分和热力学系数}
+
+特征投影需要 \(\partial p/\partial \QQ\)。本节把物种系数和双温系数从
+状态方程逐项推出。记
+\[
+q_s=\rho Y_s,\qquad q_{\ve}=\rho E_{\ve}.
+\]
+平动--转动内能密度为
+\[
+\rho e_{\tr}=\rho E-\frac{(\rho u)^2+(\rho v)^2+(\rho w)^2}{2\rho}-q_{\ve}.
+\]
+因此
+\[
+\dd(\rho e_{\tr})
+=\dd(\rho E)-\uu\cdot\dd(\rho\uu)+K\dd\rho-\dd q_{\ve}.
+\]
+另一方面，
+\[
+\rho e_{\tr}=\sum_s q_s e_{\tr,s}(T),
+\qquad
+p=T\sum_s q_sR_s .
+\]
+这里把 \(q_s=\rho Y_s\) 作为守恒变量中的物种密度来求微分，
+\(T\) 作为由能量闭合反求的热力学变量。对第一式直接使用乘积微分：
+\[
+\begin{aligned}
+\dd(\rho e_{\tr})
+&=\dd\left[\sum_s q_s e_{\tr,s}(T)\right] \\
+&=\sum_s e_{\tr,s}(T)\,\dd q_s
+  +\sum_s q_s \frac{\partial e_{\tr,s}}{\partial T}\,\dd T .
+\end{aligned}
+\]
+由
+\[
+e_{\tr,s}(T)=h_{eq,s}(T)-R_sT-\varepsilon_{\ve,s}(T)
+\]
+可得物种平动--转动定容比热
+\[
+c_{v,\tr,s}(T)
+=\frac{\partial e_{\tr,s}}{\partial T}
+=c_{p,eq,s}(T)-R_s-c_{v,\ve,s}(T).
+\]
+混合物平动--转动定容比热定义为
+\[
+c_{v,\tr}=\sum_sY_s c_{v,\tr,s},
+\]
+因此
+\[
+\sum_s q_s \frac{\partial e_{\tr,s}}{\partial T}
+=\rho\sum_sY_s c_{v,\tr,s}
+=\rho c_{v,\tr}.
+\]
+于是
+\[
+\dd(\rho e_{\tr})
+=\rho c_{v,\tr}\dd T+\sum_s e_{\tr,s}\dd q_s,
+\]
+\[
+\dd p=\rho R_{mix}\dd T+T\sum_sR_s\dd q_s,
+\qquad
+R_{mix}=\sum_sY_sR_s .
+\]
+用
+\[
+\Gammaone=\gamma_{\tr}-1=\frac{R_{mix}}{c_{v,\tr}},
+\qquad
+c^2=\gamma_{\tr}R_{mix}T
+\]
+消去 \(\dd T\) 后即可得到压力对守恒变量的微分。WENO 特征矩阵要求
+\(\dd p\) 写成守恒变量
+\[
+\dd\rho,\quad \dd(\rho u),\quad \dd(\rho v),\quad
+\dd(\rho w),\quad \dd(\rho E),\quad \dd q_s,\quad \dd q_{\ve}
+\]
+的线性组合，因此以下推导先把温度微分完全消去。
+首先从守恒变量精确计算 \(\dd(\rho e_{\tr})\)。令
+\[
+\bm{m}=\rho\uu,\qquad
+\rho K=\frac{\bm{m}\cdot\bm{m}}{2\rho}.
+\]
+动能密度的微分为
+\[
+\begin{aligned}
+\dd(\rho K)
+&=\dd\left(\frac{\bm{m}\cdot\bm{m}}{2\rho}\right)\\
+&=\frac{\bm{m}}{\rho}\cdot\dd\bm{m}
+  -\frac{\bm{m}\cdot\bm{m}}{2\rho^2}\dd\rho\\
+&=\uu\cdot\dd\bm{m}-K\dd\rho
+ =\uu\cdot\dd(\rho\uu)-K\dd\rho .
+\end{aligned}
+\]
+又因为
+\[
+\rho e_{\tr}=\rho E-\rho K-q_{\ve},
+\]
+所以
+\[
+B=\dd(\rho E)-\uu\cdot\dd\bm{m}+K\dd\rho-\dd q_{\ve}
+\]
+实际上就是
+\[
+\boxed{B=\dd(\rho e_{\tr})}.
+\]
+另一方面，热力学表达已经给出
+\[
+B=\rho c_{v,\tr}\dd T+\sum_s e_{\tr,s}\dd q_s .
+\]
+解出 \(\dd T\)：
+\[
+B-\sum_s e_{\tr,s}\dd q_s
+=\rho c_{v,\tr}\dd T,
+\]
+\[
+\boxed{
+\dd T
+=\frac{B}{\rho c_{v,\tr}}
+-\sum_s\frac{e_{\tr,s}}{\rho c_{v,\tr}}\dd q_s
+}
+\]
+或者等价地写成
+\[
+\dd T
+=\frac{1}{\rho c_{v,\tr}}\left(B-\sum_s e_{\tr,s}\dd q_s\right).
+\]
+接下来逐项代入状态方程微分
+\[
+\dd p=\rho R_{mix}\dd T+T\sum_sR_s\dd q_s,
+\]
+得到
+\[
+\begin{aligned}
+\dd p
+&=\rho R_{mix}
+\frac{1}{\rho c_{v,\tr}}
+\left(B-\sum_s e_{\tr,s}\dd q_s\right)
++T\sum_sR_s\dd q_s\\
+&=\frac{R_{mix}}{c_{v,\tr}}B
+-\frac{R_{mix}}{c_{v,\tr}}\sum_s e_{\tr,s}\dd q_s
++T\sum_sR_s\dd q_s\\
+&=\Gammaone B
+ -\Gammaone\sum_s e_{\tr,s}\dd q_s
+ +\sum_sR_sT\dd q_s\\
+&=\Gammaone B
++\sum_s\left(R_sT-\Gammaone e_{\tr,s}\right)\dd q_s .
+\end{aligned}
+\]
+其中最后一步使用
+\[
+-\Gammaone\sum_s e_{\tr,s}\dd q_s
++\sum_sR_sT\dd q_s
+=\sum_s\left(R_sT-\Gammaone e_{\tr,s}\right)\dd q_s .
+\]
+最后把 \(B\) 展开，得到对守恒变量微分的完整形式：
+\[
+\boxed{
+\dd p
+=\Gammaone\left[\dd(\rho E)-\uu\cdot\dd(\rho\uu)+K\dd\rho-\dd q_{\ve}\right]
++\sum_s\left(R_sT-\Gammaone e_{\tr,s}\right)\dd q_s .
+}
+\]
+把每一类守恒变量的系数逐项写出，得到
+\[
+\begin{aligned}
+\dd p
+&=\Gammaone K\,\dd\rho
+  -\Gammaone u\,\dd(\rho u)
+  -\Gammaone v\,\dd(\rho v)
+  -\Gammaone w\,\dd(\rho w)
+  +\Gammaone\,\dd(\rho E)\\
+&\quad
+  +\sum_s\left(R_sT-\Gammaone e_{\tr,s}\right)\dd q_s
+  -\Gammaone\,\dd q_{\ve}.
+\end{aligned}
+\]
+压力微分没有 \(\dd T_{\ve}\) 项，因为 \(q_{\ve}=\rho E_{\ve}\)
+是独立守恒量；\(T_{\ve}\) 只由 \(E_{\ve}\) 和组分反解，用于源项、
+粘性项和输出。
+
+COREFL 对所有 transported scalar 使用同一段 WENO 投影循环。为使公式下标
+和源码数组下标一致，将物种、\(\rho E_{\ve}\) 以及其他 transported scalar
+的压力系数统一记为 \(\alpha_a\)。标量守恒量按
+\[
+q_a=\rho\phi_a,\qquad
+\phi_a\in\{Y_1,\ldots,Y_{N_s},E_{\ve},\text{其他 transported scalar}\}
+\]
+存储和重构，WENO 投影代码中的 \code{Q[5+a]} 正是 \(q_a\)。
+对任意标量 \(q_a\)，定义
+\[
+\boxed{c^2\alpha_a=
+\text{\(\dd q_a\) 在 \(\dd p\) 中的系数}} .
+\]
+对物种标量，上一式已经给出 \(\dd q_s\) 的系数；
+对双温标量，\(\dd q_{\ve}\) 的系数来自
+\(-\Gammaone\dd q_{\ve}\)；对不进入压力闭合的其他标量，压力系数为零。
+于是所有标量贡献合并为
+\[
+c^2\sum_a\alpha_a\dd q_a
+\]
+并由同一个数组 \code{scalar\_alpha[a]} 进入投影。
+于是压力微分可写为
+\[
+\dd p
+=\Gammaone\left[\dd(\rho E)-\uu\cdot\dd(\rho\uu)+K\dd\rho\right]
++c^2\sum_a\alpha_a\dd q_a.
+\]
+此时 \(-\Gammaone\dd q_{\ve}\) 已由求和中的
+\(a=\ve\) 项表示，故括号中不再显式写该项。
+逐项对应关系为
+\[
+\begin{array}{c|c|c}
+\text{标量守恒量 }q_a & \text{\(\dd p\) 中乘在 \(\dd q_a\) 前的系数}
+& \alpha_a\\ \hline
+q_s=\rho Y_s
+& R_sT-\Gammaone e_{\tr,s}
+& (R_sT-\Gammaone e_{\tr,s})/c^2\\
+q_{\ve}=\rho E_{\ve}
+& -\Gammaone
+& -\Gammaone/c^2\\
+\text{不参与压力闭合的其他标量}
+& 0
+& 0
+\end{array}
+\]
+该记号只把
+\(\sum_s(\cdots)\dd q_s-\Gammaone\dd q_{\ve}\)
+整理为按标量下标 \(a\) 遍历的数组形式；物理变量定义不变：
+\(E_{\ve}\) 是独立标量，\(T_{\ve}\) 不进入状态方程。
+后面的特征投影统一使用 \(\sum_a\alpha_a\delta(\rho\phi_a)\)。
+
+物种 \(Y_s\) 的系数来自
+\[
+R_sT-\Gammaone e_{\tr,s}
+=\gamma_{\tr}R_sT-\Gammaone h_{\tr,s},
+\qquad h_{\tr,s}=e_{\tr,s}+R_sT,
+\]
+等号右边的推导为
+\[
+\begin{aligned}
+R_sT-\Gammaone e_{\tr,s}
+&=R_sT-\Gammaone(h_{\tr,s}-R_sT)\\
+&=(1+\Gammaone)R_sT-\Gammaone h_{\tr,s}\\
+&=\gamma_{\tr}R_sT-\Gammaone h_{\tr,s}.
+\end{aligned}
+\]
+因此
+\[
+\boxed{\alpha_s=
+\frac{\gamma_{\tr}R_sT-\Gammaone h_{\tr,s}}{c^2}}.
+\]
+双温标量 \(E_{\ve}\) 只通过
+\(-q_{\ve}\) 进入 \(\rho e_{\tr}\)，没有 \(R_sT\) 型状态方程项，因此
+\[
+c^2\alpha_{\ve}=-\Gammaone,
+\]
+也就是
+\[
+\boxed{\alpha_{\ve}=-\frac{\Gammaone}{c^2}}.
+\]
+不参与压力闭合的被动标量或湍流标量有 \(\alpha_a=0\)。
+
+由这些压力系数定义
+\[
+\boxed{
+\chi_a=-\frac{\alpha_a c^2}{\Gammaone}
+}
+\]
+是该标量波的总能量补偿系数。对物种标量，
+\[
+\begin{aligned}
+\chi_s
+&=-\frac{1}{\Gammaone}
+  \left(\gamma_{\tr}R_sT-\Gammaone h_{\tr,s}\right)\\
+&=h_{\tr,s}-\frac{\gamma_{\tr}R_sT}{\Gammaone}.
+\end{aligned}
+\]
+对双温标量，
+\[
+\chi_{\ve}
+=-\frac{1}{\Gammaone}\left(-\Gammaone\right)=1.
+\]
+
+实际守恒变量是 \(q_{\ve}=\rho E_{\ve}\)。推导中的
+\(e_{\tr,s}(T)\) 只来自 NASA 单温热力学的平动--转动拆分。
+总能量闭合若写成
+\(K+\sum_sY_s[h_{eq,s}(T)-R_sT-\varepsilon_{\ve,s}(T_{\ve})]+E_{\ve}\)，
+该写法会把独立 VE 能量先减后加，改变
+\(\rho e_{\tr}=\rho E-\rho K-\rho E_{\ve}\) 以及压力微分。
+
+以上系数对应 \texttt{src/Thermo.cuh} 中的特征热力学辅助函数。
+该函数令 \texttt{scalar\_alpha[s]} 存储 \(\alpha_s\)，
+\texttt{scalar\_alpha[i\_eve]} 存储 \(-\Gammaone/c^2\)，
+\texttt{energy\_coeff[a]} 存储 \(\chi_a\)。
+
+\[
+\begin{array}{c|c|c}
+\hline
+\text{源码变量} & \text{数学量} & \text{双温标量取值}\\
+\hline
+\code{scalar\_alpha[l]} & \alpha_l & -\Gammaone/c^2\\
+\code{energy\_coeff[l]} & \chi_l=-\alpha_lc^2/\Gammaone & 1\\
+\code{Q[5+l]} & q_l=\rho\phi_l & \rho E_{\ve}\\
+\code{svm[l]} & \bar\phi_l & \bar E_{\ve}\\
+\code{fChar[5+l]} & f_{\phi_l} & f_{E_{\ve}}\\
+\hline
+\end{array}
+\qquad (l=i_{\ve})
+\]
+
+\section{线性化特征问题}
+
+先在单位法向 \(\nn\) 上推导，最后再乘以 \(|\kk|\)。
+法向通量 \(\FF_n\) 满足 \(\FF_k=|\kk|\FF_n\)，
+法向速度为 \(U=\nn\cdot\uu\)。
+守恒变量的单位法向无粘通量为
+\[
+\FF_n=
+\begin{bmatrix}
+\rho U\\
+\rho uU+n_xp\\
+\rho vU+n_yp\\
+\rho wU+n_zp\\
+(\rho E+p)U\\
+\rho\phi_1U\\
+\vdots\\
+\rho\phi_MU
+\end{bmatrix}.
+\]
+对任意扰动，通量微分为
+\[
+\delta F_{\rho}=\delta\bm{m}\cdot\nn,
+\]
+\[
+\delta\bm{F}_{\rho\uu}
+=U\,\delta\bm{m}
++\uu(\delta\bm{m}\cdot\nn-U\delta\rho)+\nn\,\delta p,
+\]
+\[
+\delta F_{\rho E}
+=U\,\delta(\rho E)+H(\delta\bm{m}\cdot\nn-U\delta\rho)+U\,\delta p,
+\qquad H=E+\frac{p}{\rho},
+\]
+\[
+\delta F_{\rho\phi_a}
+=U\,\delta(\rho\phi_a)+\phi_a(\delta\bm{m}\cdot\nn-U\delta\rho).
+\]
+将特征方程写成
+\((\partial\FF_n/\partial\QQ)\delta\QQ=\lambda_n\delta\QQ\)，
+并从每一行减去 \(U\delta\QQ\)，即可得到
+\(\mu=\lambda_n-U\) 形式。
+设扰动为
+\[
+\delta\QQ=
+\left[\delta\rho,\delta\bm{m},\delta(\rho E),
+\delta(\rho\phi_1),\ldots,\delta(\rho\phi_M)\right]^T,
+\qquad \bm{m}=\rho\uu .
+\]
+令 \(\mu=\lambda_n-U\)。由
+\((\partial\FF_n/\partial\QQ-U I)\delta\QQ=\mu\delta\QQ\)
+可得五类基本关系：
+\[
+\delta\bm{m}\cdot\nn-U\delta\rho=\mu\,\delta\rho,
+\]
+\[
+\uu(\delta\bm{m}\cdot\nn-U\delta\rho)+\nn\,\delta p=\mu\,\delta\bm{m},
+\]
+\[
+H(\delta\bm{m}\cdot\nn-U\delta\rho)+U\,\delta p=\mu\,\delta(\rho E),
+\]
+\[
+\phi_a(\delta\bm{m}\cdot\nn-U\delta\rho)=\mu\,\delta(\rho\phi_a),
+\]
+\[
+\delta p
+=\Gammaone\left[
+\delta(\rho E)-\uu\cdot\delta\bm{m}+K\delta\rho\right]
++c^2\sum_a\alpha_a\delta(\rho\phi_a).
+\]
+
+\subsection{声波}
+
+若 \(\mu\ne0\)，由质量和标量方程得
+\[
+\delta\bm{m}\cdot\nn-U\delta\rho=\mu\delta\rho,
+\qquad
+\delta(\rho\phi_a)=\phi_a\delta\rho .
+\]
+取归一化 \(\delta\rho=1\)。动量方程给出
+\[
+\delta\bm{m}=\uu+\frac{\delta p}{\mu}\nn .
+\]
+能量方程给出
+\[
+\delta(\rho E)=H+\frac{U\,\delta p}{\mu}.
+\]
+代入压力微分，并利用
+\[
+c^2\sum_a\alpha_a\phi_a
+=c^2-\Gammaone\left(H-K\right),
+\]
+该恒等式可由热力学定义直接验证。由
+\[
+\sum_a\alpha_a\phi_a
+=\sum_s\alpha_sY_s+\alpha_{\ve}E_{\ve}
+\]
+和上节给出的系数，有
+\[
+\begin{aligned}
+c^2\sum_a\alpha_a\phi_a
+&=\sum_sY_s(\gamma_{\tr}R_sT-\Gammaone h_{\tr,s})
+  -\Gammaone E_{\ve}\\
+&=\gamma_{\tr}R_{mix}T
+  -\Gammaone\left(\sum_sY_sh_{\tr,s}+E_{\ve}\right).
+\end{aligned}
+\]
+又
+\[
+c^2=\gamma_{\tr}R_{mix}T,\qquad
+H-K=\sum_sY_sh_{\tr,s}+E_{\ve},
+\]
+因此得到上述恒等式。将声波关系
+\[
+\delta\bm{m}=\uu+\frac{\delta p}{\mu}\nn,\qquad
+\delta(\rho E)=H+\frac{U\delta p}{\mu},\qquad
+\delta(\rho\phi_a)=\phi_a
+\]
+代入压力微分，括号内的动量和能量压力项相互抵消：
+\[
+\begin{aligned}
+\delta p
+&=\Gammaone\left[
+H+\frac{U\delta p}{\mu}
+-\uu\cdot\left(\uu+\frac{\delta p}{\mu}\nn\right)+K
+\right]
++c^2\sum_a\alpha_a\phi_a\\
+&=\Gammaone(H-K)+c^2\sum_a\alpha_a\phi_a=c^2 .
+\end{aligned}
+\]
+得到
+\[
+\delta p=c^2 .
+\]
+再由质量关系和动量关系的法向分量可得
+\[
+\nn\cdot\delta\bm{m}-U\delta\rho=\mu\delta\rho,
+\]
+\[
+\nn\cdot\delta\bm{m}
+=U\delta\rho+\frac{\delta p}{\mu},
+\]
+两式相减得到
+\[
+\mu^2=\delta p=c^2.
+\]
+因此单位法向声波特征值为
+\[
+\lambda_n=U-c,\qquad \lambda_n=U+c.
+\]
+对应右特征向量为
+\[
+r_{\pm}=
+\begin{bmatrix}
+1\\
+u\pm cn_x\\
+v\pm cn_y\\
+w\pm cn_z\\
+H\pm cU\\
+\phi_1\\
+\vdots\\
+\phi_M
+\end{bmatrix}.
+\]
+
+\subsection{切向波、接触波和标量波}
+
+若 \(\mu=0\)，质量方程给出 \(\delta U=0\)，动量方程给出
+\(\delta p=0\)。因此 \(\lambda_n=U\) 至少有切向、接触和标量波。
+这里的 \(\delta U\) 表示速度扰动的法向分量
+\[
+\delta U=\nn\cdot(\delta\bm{m}/\rho-\uu\,\delta\rho/\rho).
+\]
+在下列三个族中均有
+\[
+\delta\bm{m}\cdot\nn-U\delta\rho=0,
+\qquad \delta p=0,
+\]
+因此满足 \(\mu=0\) 的质量、动量法向、能量和标量方程。
+
+取两组单位切向量 \(\bm{t},\bm{b}\)，满足
+\[
+\nn\cdot\bm{t}=\nn\cdot\bm{b}=\bm{t}\cdot\bm{b}=0,
+\qquad
+\bm{b}=\nn\times\bm{t}.
+\]
+记 \(U_t=\bm{t}\cdot\uu\), \(U_b=\bm{b}\cdot\uu\)。切向波为
+\[
+r_t=
+\begin{bmatrix}
+0\\t_x\\t_y\\t_z\\U_t\\0\\\vdots\\0
+\end{bmatrix},
+\qquad
+r_b=
+\begin{bmatrix}
+0\\b_x\\b_y\\b_z\\U_b\\0\\\vdots\\0
+\end{bmatrix}.
+\]
+
+接触波取
+\[
+\delta\rho=1,\qquad \delta\bm{m}=\uu,\qquad
+\delta(\rho\phi_a)=\phi_a .
+\]
+\(\delta p=0\) 要求
+\[
+0=\Gammaone\left[\delta(\rho E)-K\right]
++c^2\sum_a\alpha_a\phi_a ,
+\]
+所以接触波能量分量为
+\[
+\delta(\rho E)
+=K-\frac{c^2}{\Gammaone}\sum_a\alpha_a\phi_a
+=K+\sum_a\phi_a\chi_a
+=H-\frac{c^2}{\Gammaone},
+\]
+其中
+\[
+\boxed{\chi_a=-\frac{\alpha_a c^2}{\Gammaone}}.
+\]
+因此
+\[
+r_c=
+\begin{bmatrix}
+1\\u\\v\\w\\H-\frac{c^2}{\Gammaone}\\\phi_1\\\vdots\\\phi_M
+\end{bmatrix}.
+\]
+只有单组分理想气体或没有热力学标量时，
+\(H-c^2/\Gammaone\) 才退化为 \(K\)；对反应混合气，
+该分量不是 \(K-c^2/\Gammaone\)。
+
+每个 transported scalar 的独立标量波取
+\[
+\delta\rho=0,\qquad \delta\bm{m}=0,\qquad
+\delta(\rho\phi_a)=1 .
+\]
+\(\delta p=0\) 给出
+\[
+\Gammaone\,\delta(\rho E)+c^2\alpha_a=0,
+\]
+因此该波必须同时带有
+\[
+\delta(\rho E)=\chi_a=-\frac{\alpha_a c^2}{\Gammaone}.
+\]
+右特征向量为
+\[
+r_{\phi_a}=
+\begin{bmatrix}
+0\\0\\0\\0\\\chi_a\\0\\\vdots\\1\text{ at scalar }a\\\vdots\\0
+\end{bmatrix}.
+\]
+代入压力微分可验证
+\[
+\delta p
+=\Gammaone\chi_a+c^2\alpha_a=0.
+\]
+物种波的能量补偿为
+\[
+\boxed{\chi_s
+=h_{\tr,s}-\frac{\gamma_{\tr}R_sT}{\Gammaone}},
+\]
+双温标量波的能量补偿为
+\[
+\boxed{\chi_{\ve}=1}.
+\]
+所以双温右特征向量为
+\[
+r_{E_{\ve}}=[0,0,0,0,1,0,\ldots,1\text{ at }\rho E_{\ve},\ldots,0]^T .
+\]
+对 \(a=i_{\ve}\)，\(\chi_{\ve}=1\) 且
+\(\alpha_{\ve}=-\Gammaone/c^2\)。该标量波同时增加
+\(\rho E\) 与 \(\rho E_{\ve}\)，使
+\(\rho e_{\tr}=\rho E-\rho K-\rho E_{\ve}\) 和压力保持不变。
+
+\section{特征值}
+
+单位法向下的特征值已经由上节得到：
+\[
+\lambda_n^- = U-c,\qquad
+\lambda_n^0=U,\qquad
+\lambda_n^+ = U+c .
+\]
+\(\lambda_n^0\) 的重数为 \(M+3\)：两个切向动量波、一个接触波和
+\(M\) 个 transported-scalar 波。曲线坐标方向满足
+\(\FF_k=|\kk|\FF_n\)，所以
+\[
+\boxed{\lambda_- = U_k-c|\kk|,\qquad
+\lambda_0=U_k,\qquad
+\lambda_+=U_k+c|\kk|}.
+\]
+
+\section{左特征向量与投影}
+
+对任意守恒扰动或通量型向量
+\[
+\zz=[z_\rho,z_{\rho u},z_{\rho v},z_{\rho w},z_{\rho E},
+z_{\rho\phi_1},\ldots,z_{\rho\phi_M}]^T,
+\]
+并记 \(\zz_m=(z_{\rho u},z_{\rho v},z_{\rho w})^T\)。
+定义
+\[
+\beta(\zz)=\sum_{a=1}^{M}\alpha_a z_{\rho\phi_a}.
+\]
+本节中 \(U=U_n=\nn\cdot\uu\)。
+把 \(\zz\) 展开为
+\[
+\zz=a_-r_-+a_t r_t+a_b r_b+a_c r_c+\sum_a a_{\phi_a}r_{\phi_a}.
+\]
+由密度分量有
+\[
+z_\rho=a_-+a_c+a_+ .
+\]
+由标量分量有
+\[
+z_{\rho\phi_a}=\phi_a(a_-+a_c+a_+)+a_{\phi_a},
+\]
+因此
+\[
+\boxed{a_{\phi_a}=z_{\rho\phi_a}-\phi_a z_\rho}.
+\]
+切向动量直接给出
+\[
+\boxed{a_t=\bm{t}\cdot\zz_m-U_tz_\rho},\qquad
+\boxed{a_b=\bm{b}\cdot\zz_m-U_bz_\rho}.
+\]
+压力微分作用在 \(\zz\) 上为
+\[
+\delta p(\zz)
+=\Gammaone(z_{\rho E}-\uu\cdot\zz_m+Kz_\rho)
++c^2\beta(\zz).
+\]
+因为只有两个声波带有压力扰动，且
+\(\delta p(r_-)=\delta p(r_+)=c^2\)，所以
+\[
+a_-+a_+=\frac{\delta p(\zz)}{c^2}.
+\]
+再由法向动量分量
+\[
+\nn\cdot\zz_m=Uz_\rho+c(a_+-a_-)
+\]
+得到
+\[
+a_+-a_-=\frac{\nn\cdot\zz_m-Uz_\rho}{c}.
+\]
+联立可得声波投影、接触投影和标量投影。写成行向量形式即
+\[
+L_-\zz=
+\frac{1}{2}\left[
+\frac{\Gammaone K+cU}{c^2}z_\rho
+-\frac{(\Gammaone\uu+c\nn)\cdot\zz_m}{c^2}
++\frac{\Gammaone}{c^2}z_{\rho E}
++\beta(\zz)\right],
+\]
+\[
+L_t\zz=-U_tz_\rho+\bm{t}\cdot\zz_m,\qquad
+L_b\zz=-U_bz_\rho+\bm{b}\cdot\zz_m,
+\]
+\[
+L_c\zz=
+\left(1-\frac{\Gammaone K}{c^2}\right)z_\rho
++\frac{\Gammaone}{c^2}\uu\cdot\zz_m
+-\frac{\Gammaone}{c^2}z_{\rho E}
+-\beta(\zz),
+\]
+\[
+L_+\zz=
+\frac{1}{2}\left[
+\frac{\Gammaone K-cU}{c^2}z_\rho
+-\frac{(\Gammaone\uu-c\nn)\cdot\zz_m}{c^2}
++\frac{\Gammaone}{c^2}z_{\rho E}
++\beta(\zz)\right],
+\]
+\[
+L_{\phi_a}\zz=z_{\rho\phi_a}-\phi_a z_\rho.
+\]
+这些行向量满足 \(\LL\RR=I\)。
+双温标量系数 \(\alpha_{\ve}=-\Gammaone/c^2\) 代入后，
+当 \(\zz=r_{E_{\ve}}\) 时
+\[
+L_-\zz=L_t\zz=L_b\zz=L_c\zz=L_+\zz=0,\qquad
+L_{E_{\ve}}\zz=1.
+\]
+因此把 \(E_{\ve}\) 作为单独标量处理时，特征投影是严格闭合的。
+
+\section{特征 WENO 离散}
+
+在界面 \(i+1/2\) 处取 Roe 平均状态，构造局部特征矩阵
+\(\LL_{i+1/2}\)、\(\RR_{i+1/2}\) 和最大谱半径
+\[
+\lambda_{\max}=\max_m\left(|U_k|+c|\kk|\right)_m .
+\]
+有限差分 WENO 使用局部 Lax--Friedrichs 分裂
+\[
+\FF^{\pm}_m=\frac{1}{2}\left(\FF_m\pm\lambda_{\max}\QQ_m\right),
+\]
+投影到特征空间
+\[
+\hat{\FF}^{\pm}_m=\LL_{i+1/2}\FF^{\pm}_m,
+\]
+分别做 WENO5 或 WENO7 重构：
+\[
+\hat{\FF}_{i+1/2}
+=\mathcal{WENO}(\hat{\FF}^{+}_{i-r},\ldots,\hat{\FF}^{+}_{i+s})
++\mathcal{WENO}(\hat{\FF}^{-}_{i+1-r},\ldots,\hat{\FF}^{-}_{i+1+s}),
+\]
+最后回投影
+\[
+\FF_{i+1/2}=\RR_{i+1/2}\hat{\FF}_{i+1/2}.
+\]
+残差按有限差分形式写为
+\[
+\frac{\dd \QQ_i}{\dd t}
+=-\left(\FF_{i+1/2}-\FF_{i-1/2}\right)+\cdots .
+\]
+
+\subsection{WENO 源码变量对应}
+
+\texttt{src/WENO.cu} 的 x、y、z 三个 characteristic kernel 使用相同的局部特征结构。
+共享数组 \texttt{Q} 存储守恒量，\texttt{F[0]} 存储 \(U_k\)，
+\texttt{F[1:3]} 存储动量无粘通量，\texttt{F[4]} 存储压力，
+\texttt{F[5]} 存储 \(c|\kk|\)，\texttt{F[6]} 存储 Jacobian。
+\texttt{Q[5+i\_eve]} 是 \(\rho E_{\ve}\)，没有对 \(T_{\ve}\) 做特征重构；
+\(T_{\ve}\) 只在源项和粘性项中通过辅助数组使用。界面 Roe 平均为
+\[
+\bar{\phi}_a=\texttt{svm[a]},\qquad
+\bar{T}=\texttt{temp3},\qquad
+\bar{c}=\texttt{cm},\qquad
+\bar{\gamma}-1=\texttt{gm1}.
+\]
+\code{compute\_mixture\_characteristic\_thermo} 给出
+\[
+\texttt{scalar\_alpha[a]}=\alpha_a,\qquad
+\texttt{energy\_coeff[a]}=\chi_a=-\frac{\alpha_a c^2}{\Gammaone}.
+\]
+对物种，\(\chi_s=h_{\tr,s}-\gamma_{\tr}R_sT/\Gammaone\)；对双温标量，
+\(\chi_{\ve}=1\)。
+
+声波和接触波投影中的标量压力贡献由
+\[
+\beta(\QQ)=\sum_a\alpha_a Q_{5+a},\qquad
+\beta(\FF)=\sum_a\alpha_a Q_{5+a}U_k
+\]
+给出。物理通量中的标量分量满足
+\(F_{5+a}=Q_{5+a}U_k\)，因此 \(\beta(\FF)\) 正是
+\(\sum_a\alpha_aF_{5+a}\)。代码中对应为
+\[
+\code{sumBetaQ[m]}=\sum_a\code{scalar\_alpha[a]}\,\code{Q[5+a][m]},
+\]
+\[
+\code{sumBetaF[m]}=\sum_a\code{scalar\_alpha[a]}\,\code{Q[5+a][m]}\,\code{F[0][m]}.
+\]
+五个气动特征行使用 \texttt{L[0:4]} 表示守恒量
+\((\rho,\rho u,\rho v,\rho w,\rho E)\) 的系数，并通过
+\texttt{temp1} 加入标量部分：声波 \texttt{temp1=0.5}，接触波
+\texttt{temp1=-1}，两个切向波 \texttt{temp1=0}。这与左特征向量中的
+\[
+L_-\sim +\frac{1}{2}\beta,\qquad
+L_c\sim -\beta,\qquad
+L_+\sim +\frac{1}{2}\beta
+\]
+一致。每个标量波的投影单独计算为
+\[
+L_{\phi_a}\QQ=Q_{5+a}-\bar{\phi}_aQ_0,
+\qquad
+L_{\phi_a}\FF=U_k(Q_{5+a}-\bar{\phi}_aQ_0),
+\]
+对应代码中的
+\code{Q[5+l]-svm[l]*Q[0]} 和
+\code{F[0]*(Q[5+l]-svm[l]*Q[0])}。
+
+回投影时，代码先形成
+\[
+\texttt{temp1}=f_-+f_c+f_+,\qquad
+\texttt{temp3}=f_- - f_+,
+\]
+并写出质量、动量和不含独立标量波补偿的能量贡献。该能量基础项对应
+\[
+\bar H(f_-+f_c+f_+)-\bar U\bar c(f_- - f_+)
+ +U_t f_t+U_b f_b-\frac{\bar c^2}{\bar\Gamma}f_c .
+\]
+随后标量回投影为
+\[
+F_{5+a}=\bar{\phi}_a\,\texttt{temp1}+f_{\phi_a},
+\]
+对应 \texttt{fc/gc/hc(...,5+l)=svm[l]*temp1+fChar[5+l]}；总能量再加
+\[
+\sum_a \chi_a f_{\phi_a},
+\]
+对应 \code{sum energy\_coeff[l]*fChar[5+l]}。当 \(a=i_{\ve}\) 时
+\(\chi_{\ve}=1\)，所以 \(\rho E_{\ve}\) 标量波的能量补偿被等量加入总能量。
+Roe 矩阵耗散路径 \texttt{src/InviscidScheme.cu} 使用同一组
+\texttt{scalar\_alpha} 和 \texttt{energy\_coeff}：\code{c1} 中累加
+\(\sum_a\alpha_a\Delta q_a\)，回投影时 \code{c3} 累加
+\(\sum_a\chi_a b_{5+a}\)。因此 WENO characteristic kernel 与 Roe
+耗散路径对 \(E_{\ve}\) 标量的处理一致。
+
+\section{源码映射与实现核对}
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth}
+                  >{\raggedright\arraybackslash}p{0.25\linewidth}
+                  >{\raggedright\arraybackslash}p{0.40\linewidth}}
+\hline
+数学项 & 源码位置 & 代码实现对应\\
+\hline
+\endhead
+编译期双温选择 &
+\code{CMakeLists.txt}, \code{src/Define.h} &
+\code{COREFL\_ENABLE\_TWO\_TEMPERATURE} 生成
+\texttt{kTwoTemperature}；设备端双温路径均在
+\texttt{if constexpr (kTwoTemperature)} 下编译。\\
+\hline
+\(\rho E_{\ve}\) 布局 &
+\code{src/Parameter.cpp} &
+\code{i\_eve=n\_spec}, \code{i\_eve\_cv=5+n\_spec}；
+\texttt{n\_scalar\_transported} 加 1。\texttt{Tve} 只作为
+\texttt{n\_other\_var} 输出和 \texttt{temperature\_ve} 辅助场。\\
+\hline
+总能量闭合 \(E=K+\sum_sY_se_{\tr,s}(T)+E_{\ve}\) &
+\code{src/FieldOperation.cuh}, \code{src/FieldOperation.cu}, \code{src/Thermo.cu} &
+\code{compute\_total\_energy} 在 NASA 单温内能
+\(h_{eq,s}-R_sT\) 后减 \(\Mve(T,Y)\)，再加
+\code{sv[i\_eve]}。\code{compute\_mixture\_tr\_energy} 返回
+\(e_{\tr}(T,Y)\)，反算温度时固定 \texttt{Eve}。\\
+\hline
+无粘通量 \(\rho E_{\ve}U_k\) &
+\code{src/WENO.cu}, \code{src/InviscidScheme.cu} &
+\texttt{WENO.cu} 将 \code{Q[5+l]} 作为所有 transported scalar 的守恒量，
+标量特征通量使用 \code{F[0]*(Q[5+l]-svm[l]*Q[0])}；
+物理通量层面即 \(Q_{5+a}U_k\)。当 \(a=i_{\ve}\) 时即
+\(\rho E_{\ve}U_k\)。\\
+\hline
+\(\alpha_s,\alpha_{\ve}\) 和 \(\chi_a\) &
+\code{src/Thermo.cuh} &
+\code{compute\_mixture\_characteristic\_thermo} 中
+\code{h\_tr\_i=h\_eq-eve\_eq},
+\code{alpha=(gamma*R\_s*T-gm1*h\_tr\_i)/c2}；
+\code{scalar\_alpha[i\_eve]=-gm1/c2}；
+\code{energy\_coeff[l]=-alpha*c2/gm1}，故
+\code{energy\_coeff[i\_eve]=1}。\\
+\hline
+WENO 特征投影/回投影 &
+\code{src/WENO.cu} &
+x/y/z 三个 characteristic kernel 均用左右界面状态构造 Roe 平均
+\texttt{svm} 和 \texttt{temp3}，调用
+\code{compute\_mixture\_characteristic\_thermo}。投影时
+\code{sumBetaQ=sum scalar\_alpha[n]*Q[5+n]}，
+\code{sumBetaF=sum scalar\_alpha[n]*Q[5+n]*F[0]}；
+回投影时能量分量加
+\code{sum energy\_coeff[l]*fChar[5+l]}，
+标量分量为 \code{svm[l]*temp1+fChar[5+l]}。\\
+\hline
+化学源 \(\sum_s\dot\omega_s \varepsilon_{\ve,s}(T_{\ve})\) &
+\code{src/FiniteRateChem.cu} &
+\code{compute\_two\_temperature\_chemical\_source} 读取
+\code{zone->temperature\_ve}，循环
+\code{omega[l]*compute\_ve\_energy(l,tve,param)}；
+有限率化学 kernel 将结果加到 \code{dq(...,5+i\_eve)}。
+瞬态 RK3 在 \texttt{Parameter.cpp} 中强制 \code{chemSrcMethod=0}，
+因此 \(\rho E_{\ve}\) 化学源在当前双温 CFD 路径为显式。\\
+\hline
+VT 源 \(\dot\Theta^{\tr:\ve}\) &
+\code{src/Thermo.cu}, \code{src/FieldOperation.cuh}, \code{src/RK.cuh}, \code{src/ConstVolumeReactor.cpp} &
+\code{compute\_vt\_relaxation\_source} 对
+\code{theta\_v[i]>0} 的物种累加
+\(\rho Y_i[\varepsilon_{\ve,i}(T)-\varepsilon_{\ve,i}(T_{\ve})]/\tau_i\)，
+其中两端均调用 \code{compute\_ve\_energy}。
+\code{apply\_vt\_relaxation\_1\_point} 用
+\code{exp(-dt/tau\_eff)} 更新 \texttt{rhoEve}，再反解
+\texttt{Tve} 并重新闭合 \(T,p\)。\\
+\hline
+粘性热通量 &
+\code{src/FieldOperation.cuh}, \code{src/ViscousScheme.cu} &
+\code{compute\_transport\_property} 后保存的平衡导热为
+\code{conductivity\_eq}；随后
+\code{thermal\_conductivity=conductivity\_eq*cp\_tr/cp\_mix\_tr}，
+\code{thermal\_conductivity\_ve=conductivity\_eq*cv\_ve/cp\_mix\_tr}。
+8 阶 collocated 通量在总能量 \texttt{f/g/hFlux(...,4)} 中加入
+\(\kappa_{\ve}\nabla T_{\ve}\)，并在
+\code{f/g/hFlux(...,5+i\_eve)} 写入 \(\rho E_{\ve}\) 粘性通量。\\
+\hline
+物种扩散携带能量 &
+\code{src/ViscousScheme.cu}, \code{src/Thermo.cuh} &
+总能量物种扩散焓由
+\code{compute\_nonequilibrium\_diffusion\_enthalpy} 给出
+\(h_{eq,s}(T)-\varepsilon_{\ve,s}(T)+\varepsilon_{\ve,s}(T_{\ve})\)。
+\(\rho E_{\ve}\) 通量循环中使用
+\code{compute\_ve\_energy(l,tve\_m)} 乘同一物种扩散通量。\\
+\hline
+wall 热流输出 &
+\code{src/PostProcess.cu} &
+\texttt{q\_tr\_face} 使用 \(\kappa_{\tr}\nabla T\) 和
+\(h_{eq,s}(T)-\varepsilon_{\ve,s}(T)\)；\texttt{q\_ve\_face} 使用
+\(\kappa_{\ve}\nabla T_{\ve}\) 和
+\(\varepsilon_{\ve,s}(T_{\ve})\)。输出
+\texttt{q\_tr}, \texttt{q\_ve}, \texttt{q\_total=q\_tr+q\_ve}。\\
+\hline
+restart/output &
+\code{src/Initialize.cu}, \code{src/FieldIO.h}, \code{src/Field.cu} &
+\texttt{Parameter.cpp} 将 \texttt{Eve} 加入 scalar 变量名，将
+\texttt{Tve} 加入额外输出变量名；restart/边界同步使用
+\(\Mve(T_{\ve},Y)=E_{\ve}\)。\\
+\hline
+\end{longtable}
+
+\section{VT 松弛更新}
+
+令参与 Landau--Teller/Park 松弛的物种集合为
+\[
+\mathcal{V}=\{s:\theta_{v,s}>0\}.
+\]
+COREFL 为这些有分子振动特征温度的物种构造 VT 松弛时间。
+对 \(s\in\mathcal{V}\)，松弛源采用完整的
+\(\varepsilon_{\ve,s}=\varepsilon_{vib,s}+\varepsilon_{el,s}\) 差值：
+\[
+\dot\Theta^{\tr:\ve}
+=\sum_{s\in\mathcal{V}}\rho Y_s
+\frac{\varepsilon_{\ve,s}(T)-\varepsilon_{\ve,s}(T_{\ve})}{\tau_s}.
+\]
+代码先把这个多物种源等效成
+\[
+\tau_{eff}
+=\frac{\rho\left(\Mve^{eq,\mathcal{V}}-\Mve^{\mathcal{V}}\right)}
+{\dot\Theta^{\tr:\ve}},
+\]
+其中
+\[
+\Mve^{eq,\mathcal{V}}=\sum_{s\in\mathcal{V}}Y_s\varepsilon_{\ve,s}(T),
+\qquad
+\Mve^{\mathcal{V}}=\sum_{s\in\mathcal{V}}Y_s\varepsilon_{\ve,s}(T_{\ve}).
+\]
+然后在每个 RK stage 后对参与松弛的 VE 能量做指数更新
+\[
+\mathcal{M}_{\ve,new}^{\mathcal{V}}
+=\Mve^{\mathcal{V}}\exp(-\Delta t/\tau_{eff})
++\Mve^{eq,\mathcal{V}}\left[1-\exp(-\Delta t/\tau_{eff})\right].
+\]
+守恒量更新为
+\[
+(\rho E_{\ve})_{new}
+=(\rho E_{\ve})_{old}
++\rho\left(\mathcal{M}_{\ve,new}^{\mathcal{V}}-\Mve^{\mathcal{V}}\right).
+\]
+随后代码由新的混合物 \(E_{\ve}\) 反解 \(T_{\ve}\)，并在总能量不变的条件下重新闭合
+\(T,p\)。
+
+\(\mathcal{V}\) 之外的原子电子能级没有分子振动松弛时间，
+因此不进入 LT/Park 松弛循环；但它们仍然通过
+\(\varepsilon_{\ve,s}(T_{\ve})\) 进入守恒量、化学源、粘性扩散和 \(T_{\ve}\) 反解，
+也通过 \(\varepsilon_{\ve,s}(T)\) 进入 NASA 热力学拆分。
+
+\section{振动--电子能量使用点核对}
+
+为避免 \(\varepsilon_{\ve,s}(T)\) 和 \(\varepsilon_{\ve,s}(T_{\ve})\) 混淆，所有 VE 相关位置按下表核对。
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth}
+                  >{\raggedright\arraybackslash}p{0.31\linewidth}
+                  >{\raggedright\arraybackslash}p{0.32\linewidth}}
+\hline
+用途 & 正确数学形式 & 源码结论\\
+\hline
+\endhead
+从 NASA 单温热力学定义 \(e_{\tr}\) &
+\(e_{\tr,s}(T)=h_{eq,s}(T)-R_sT-\varepsilon_{\ve,s}(T)\) &
+\code{compute\_mixture\_tr\_energy} 和特征热力学均在 \(T\) 下减去 \(\Mve(T,Y)\)。\\
+\hline
+守恒变量 &
+\(\rho E_{\ve}\)，其中 \(E_{\ve}\) 是独立 transported scalar &
+\code{sync\_two\_temperature\_state\_from\_sv} 和 restart/边界通过
+\(\Mve(T_{\ve},Y)=E_{\ve}\) 保持 \texttt{Eve} 与 \(T_{\ve}\) 一致。\\
+\hline
+总能量 &
+\(E=K+\sum_sY_se_{\tr,s}(T)+E_{\ve}\) &
+\code{compute\_total\_energy} 先减 \(\Mve(T,Y)\)，再加 \code{sv[i\_eve]}；\code{sv[i\_eve]} 是独立 \(E_{\ve}\)。\\
+\hline
+由 \(\rho E\) 反算 \(T\) &
+\(e_{\tr}(T,Y)=E-K-E_{\ve}\) &
+\code{compute\_temperature\_and\_pressure} 固定 \texttt{Eve}，
+用 \code{compute\_mixture\_tr\_energy(T)} 反解 \(T\)。\\
+\hline
+无粘通量 &
+\(\rho E_{\ve}U_k\) &
+标量通量统一为 \(Q_{5+a}U_k\)，\texttt{i\_eve} 对应 \(\rho E_{\ve}\)。\\
+\hline
+化学源 &
+\(\sum_s\dot\omega_s\varepsilon_{\ve,s}(T_{\ve})\) &
+\texttt{FiniteRateChem.cu} 和 host reactor 化学源均用 \texttt{compute\_ve\_energy(l,tve)}。\\
+\hline
+VT 松弛源 &
+\(\sum_{s\in\mathcal{V}}\rho Y_s[\varepsilon_{\ve,s}(T)-\varepsilon_{\ve,s}(T_{\ve})]/\tau_s\) &
+主 CFD 和 host reactor 均只对 \(\theta_{v,s}>0\) 的参与物种做 LT 松弛，但差值使用完整 \code{compute\_ve\_energy}，不再只用振动能。\\
+\hline
+\(\rho E_{\ve}\) 粘性扩散 &
+\(\kappa_{\ve}\nabla T_{\ve}+\sum_sD_s^{code}\varepsilon_{\ve,s}(T_{\ve})\) &
+\texttt{ViscousScheme.cu} 三个方向均用 \(T_{\ve}\) 面值计算 \code{compute\_ve\_energy(l,tve\_m)}。\\
+\hline
+总能量物种扩散 &
+\(\sum_sD_s^{code}[h_{\tr,s}(T)+\varepsilon_{\ve,s}(T_{\ve})]\) &
+\code{compute\_nonequilibrium\_diffusion\_enthalpy} 实现为 \(h_{eq,s}(T)-\varepsilon_{\ve,s}(T)+\varepsilon_{\ve,s}(T_{\ve})\)。\\
+\hline
+wall 热流拆分 &
+\(q_{\tr}\) 使用 \(h_{\tr,s}(T)\)，\(q_{\ve}\) 使用 \(\varepsilon_{\ve,s}(T_{\ve})\) &
+\texttt{PostProcess.cu} 中 \(q_{\tr}\) 的物种扩散焓减 \(\varepsilon_{\ve,s}(T)\)，\(q_{\ve}\) 的物种扩散项加 \(\varepsilon_{\ve,s}(T_{\ve})\)。\\
+\hline
+\end{longtable}
+
+\section{粘性项符号核对}
+
+SU2 文档以物理物种扩散通量 \(\bm{J}_s\) 写 Fick 定律。
+COREFL 的物种方程残差把存储的粘性通量散度直接加到 \(\dd\QQ/\dd t\)，
+因此代码中
+\[
+\bm{D}_s^{code}=-\bm{J}_s .
+\]
+在该符号约定下，双温方程的粘性通量应为
+\[
+\bm{F}_{\rho E_{\ve}}^{vis}
+=\kappa_{\ve}\nabla T_{\ve}
++\sum_s \bm{D}_s^{code}\varepsilon_{\ve,s}(T_{\ve}),
+\]
+总能量粘性通量应为
+\[
+\bm{F}_{\rho E}^{vis}
+=\bm{\tau}\cdot\uu+\kappa_{\tr}\nabla T+\kappa_{\ve}\nabla T_{\ve}
++\sum_s \bm{D}_s^{code}
+\left[h_{\tr,s}(T)+\varepsilon_{\ve,s}(T_{\ve})\right].
+\]
+代码采用如下导热拆分：
+\[
+\kappa_{\tr}=\kappa_{eq}\frac{c_{p,\tr}}{c_{p,eq}},
+\qquad
+\kappa_{\ve}=\kappa_{eq}\frac{c_{v,\ve}(T_{\ve})}{c_{p,eq}},
+\]
+其中 \(c_{p,\tr}=c_{p,eq}-c_{v,\ve}(T)\)。源码中的
+\code{cp\_mix\_tr} 在拆分前是平衡混合物 \(c_{p,eq}\)，
+\code{cp\_tr} 是减去平衡 VE 热容后的平动--转动部分。
+这与 SU2 文档中将不同能量模态导热分开处理的要求一致。
+
+源码中 8 阶 collocated 粘性通量和 2 阶面通量的数组索引不同：
+\texttt{fFlux/gFlux/hFlux} 按守恒变量索引写入，因此总能量为
+\texttt{(...,4)}，\(\rho E_{\ve}\) 为 \texttt{(...,5+i\_eve)}；
+\texttt{vis\_flux} 只存动量、能量和标量粘性通量，能量为
+\texttt{(...,3)}，第 \(l\) 个标量为 \texttt{(...,4+l)}。
+对应代码为
+\[
+\begin{array}{c|c|c}
+\text{离散路径} & \rho E\text{ 粘性通量} & \rho E_{\ve}\text{ 粘性通量}\\ \hline
+8\text{ 阶 collocated}
+& \texttt{f/g/hFlux(...,4)}
+& \code{f/g/hFlux(...,5+i\_eve)}\\
+2\text{ 阶 face}
+& \texttt{vis\_flux(...,3)}
+& \texttt{vis\_flux(...,4+i\_eve)}
+\end{array}
+\]
+两条路径都先把 \(\kappa_{\ve}\nabla T_{\ve}\) 加入总能量粘性通量，
+再把同一导热项作为 \(\rho E_{\ve}\) 方程的导热部分。总能量方程表示
+所有能量模态之和，\(\rho E_{\ve}\) 方程表示其中一个独立模态；
+同一物理 VE 导热通量同时出现在两个方程中，不构成总能量内的重复相加。
+物种扩散部分分别使用
+\(h_{\tr,s}(T)+\varepsilon_{\ve,s}(T_{\ve})\) 和
+\(\varepsilon_{\ve,s}(T_{\ve})\)。因此总能量包含实际扩散携带的
+VE 能量一次，\(\rho E_{\ve}\) 方程也得到独立的 VE 扩散通量。
+
+\section{运行约束}
+
+双温路径限定为瞬态 RK3：
+\[
+\texttt{steady=0},\qquad \texttt{temporal\_scheme=3},\qquad
+\texttt{species=1},\qquad \texttt{reaction=1}.
+\]
+该限制在 \texttt{src/Parameter.cpp} 中强制执行。
+在该路径下 \texttt{Parameter.cpp} 同时把 \code{chemSrcMethod} 置为 0；
+\(\rho E_{\ve}\) 化学源随 RK3 残差显式更新，VT 松弛源在每个 RK stage
+后通过指数公式单独更新。
+默认热力学和反应模型保持 NASA9 与 \texttt{Combustion2Part}。
+
+\end{document}

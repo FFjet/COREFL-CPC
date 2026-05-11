@@ -7,6 +7,10 @@
 using real = double;
 using uint = unsigned int;
 
+#ifndef TVE_NEWTON_TOLERANCE
+#define TVE_NEWTON_TOLERANCE 1e-6
+#endif
+
 #ifndef COREFL_ENABLE_TWO_TEMPERATURE
 #define COREFL_ENABLE_TWO_TEMPERATURE 0
 #endif

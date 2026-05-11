@@ -1,6 +1,6 @@
 # COREFL: A compressible reactive flow solver on generalized curvilinear coordinates
 
-COREFL performs direct numerical simulations of compressible reactive flows on GPU based on finite difference method.
+COREFL performs direct numerical simulations of compressible reactive flows on GPU trd on finite difference method.
 
 The docs are under construction at https://corefl.readthedocs.io/en/latest/, and the current readme is just a brief introduction to the code, including the environment requirements, compilation, and running. A simple example case is also included to illustrate the usage of the code.
 
@@ -62,7 +62,7 @@ cmake --build build-2t --parallel 16
 cp corefl corefl-2t
 ```
 
-The top-level `CMakeLists.txt` currently defaults to `MAX_SPEC_NUMBER=9`, `MAX_REAC_NUMBER=19`, `MAX_PASSIVE_SCALAR_NUMBER=1`, NASA9-capable thermodynamics, and `Combustion2Part`. These defaults match the provided AIR5 two-temperature example. Increase `MAX_SPEC_NUMBER` or `MAX_REAC_NUMBER` before configuring if the mechanism is larger.
+On GPUs newer than the default CMake architecture, pass an architecture supported by the installed `nvcc`, for example `-DCMAKE_CUDA_ARCHITECTURES=90` with CUDA 12 on this workstation; use `120` for Blackwell only with a CUDA compiler that supports `compute_120`. The top-level `CMakeLists.txt` currently defaults to `MAX_SPEC_NUMBER=9`, `MAX_REAC_NUMBER=19`, `MAX_PASSIVE_SCALAR_NUMBER=1`, NASA9-capable thermodynamics, and `Combustion2Part`. These defaults match the provided AIR5 two-temperature example. Increase `MAX_SPEC_NUMBER` or `MAX_REAC_NUMBER` before configuring if the mechanism is larger.
 
 Runtime constraints for the two-temperature path are enforced in `src/Parameter.cpp`:
 
@@ -71,18 +71,29 @@ bool steady = 0
 int temporal_scheme = 3
 int species = 1
 int reaction = 1
+int therm_nasa_7_9 = 9
+string two_temperature_file = chemistry/two_temperature.dat
 ```
 
-The flamelet path, steady update, dual-time stepping, and Wu splitting are intentionally blocked for now because `rhoEve` chemistry/VT relaxation is not wired into those update paths. In the enabled RK3 path, the chemical `rhoEve` source is explicit.
+The flamelet path, steady update, dual-time stepping, and Wu splitting are intentionally blocked for now because `rhoEve` chemistry/VT relaxation is not wired into those update paths. In the enabled RK3 CFD path, `src/Parameter.cpp` forces `chemSrcMethod = 0`, so the chemical `rhoEve` source is explicit.
 
-The added conservative variable is `rhoEve`, stored as scalar `Eve` after the species mass fractions. The output variable `Tve` is also available. The implemented frozen two-temperature energy split is:
+The added conservative variable is `rhoEve`, stored as scalar `Eve` after the species mass fractions. `Eve` is an independent transported specific energy; it should not be written as a function of `T` or `Tve`. The output variable `Tve` is auxiliary and is recovered from `Eve` and the local composition through the mixture modal-energy map `M_ve`:
 
 ```text
-E = 0.5 * (u^2 + v^2 + w^2) + e_tr(T,Y) + Eve
-h_tr,s(T) = h_eq,s(T) - E_ve,s(T)
+eps_ve,s(Theta) = eps_vib,s(Theta) + eps_el,s(Theta)
+M_ve(Theta,Y) = sum_s Y_s * eps_ve,s(Theta)
+Tve = inverse_M_ve(Eve; Y), i.e. M_ve(Tve,Y) = Eve
+
+e_tr,s(T) = h_eq,s(T) - R_s * T - eps_ve,s(T)
+E = 0.5 * (u^2 + v^2 + w^2) + sum_s Y_s * e_tr,s(T) + Eve
+h_tr,s(T) = h_eq,s(T) - eps_ve,s(T)
 F_Eve^inv = rho * Eve * U_k
-S_Eve = theta_tr:ve + sum_s omega_s * E_ve,s(Tve)
+S_Eve = theta_tr:ve + sum_s omega_s * eps_ve,s(Tve)
 ```
+
+`Eve` remains an independent transported scalar in the PDE and characteristic derivation. `Tve = inverse_M_ve(Eve; Y)` is a thermodynamic recovery step used for source terms, diffusion, restart/boundary synchronization, and output. `eps_ve,s(T)` is only the modal-energy value subtracted from NASA equilibrium thermodynamics to define the translational-rotational part. The conserved `Eve` is not `eps_ve,s(T)` and is not `eps_ve,s(Tve)`.
+
+`theta_tr:ve` is advanced with an exact exponential Landau-Teller update after each RK stage. The LT relaxation loop is applied to species with `theta_v > 0`; for those participating species the energy difference is the full `eps_ve,s = eps_vib,s + eps_el,s`, evaluated as `eps_ve,s(T) - eps_ve,s(Tve)`. Atomic electronic VE without a molecular `theta_v` still enters conserved `Eve`, chemistry, diffusion, and `Tve` inversion through `M_ve`, but it does not get a separate LT relaxation time from the current metadata. The update changes `rhoEve` and `Tve`, then recloses `T` and `p` from the unchanged total energy. The chemical part `sum_s omega_s eps_ve,s(Tve)` is assembled with the finite-rate species source and follows the enabled RK3 explicit source path.
 
 The viscous sign convention follows the existing species equation implementation. The physical species diffusion flux is `J_s`, so the species equation contains `div(-J_s)`. COREFL stores the species viscous flux as:
 
@@ -90,17 +101,26 @@ The viscous sign convention follows the existing species equation implementation
 D_s^code = -J_s
 ```
 
-This is visible in `src/ViscousScheme.cu`: the stored species flux is proportional to `+rhoD_s grad(Y_s)` in the simple Fick limit, and the viscous residual adds the divergence of the stored flux. With that convention, the two-temperature viscous fluxes implemented in the solver are:
+This is visible in `src/ViscousScheme.cu`: the stored species flux is proportional to `+rhoD_s grad(Y_s)` in the simple Fick limit, and the viscous residual adds the divergence of the stored flux. The equilibrium thermal conductivity is split in `src/FieldOperation.cuh` before the viscous kernels are called:
+
+```text
+kappa_tr = kappa_eq * cp_tr / cp_eq
+kappa_ve = kappa_eq * cv_ve(Tve) / cp_eq
+```
+
+Here `cp_eq` is the equilibrium mixture specific heat returned by the existing transport-property path. In code this variable is named `cp_mix_tr` before the split; after subtracting the equilibrium VE heat capacity, `cp_tr = cp_eq - cv_ve(T)`.
+
+This avoids counting the vibrational-electronic heat conduction once inside `kappa_eq grad(T)` and again inside `kappa_ve grad(Tve)`. With that convention, the two-temperature viscous fluxes implemented in the solver are:
 
 ```text
 F_Eve^vis = kappa_ve * grad(Tve)
-           + sum_s D_s^code * E_ve,s(Tve)
+           + sum_s D_s^code * eps_ve,s(Tve)
 
 F_E^vis = u dot tau + kappa_tr * grad(T) + kappa_ve * grad(Tve)
-          + sum_s D_s^code * (h_tr,s(T) + E_ve,s(Tve))
+          + sum_s D_s^code * (h_tr,s(T) + eps_ve,s(Tve))
 ```
 
-The nonequilibrium diffusion enthalpy helper in `src/Thermo.cuh` computes `h_eq,s(T) - E_ve,s(T) + E_ve,s(Tve)`, which is exactly `h_tr,s(T) + E_ve,s(Tve)`. The 2nd-order face kernels and the 8th-order collocated kernels in `src/ViscousScheme.cu` use this same expression for total energy. The 8th-order scalar kernel also explicitly writes the `rhoEve` viscous flux into `fFlux/gFlux/hFlux` before the 8th-order derivative is taken, so the `rhoEve` derivative does not read an old or unset flux value.
+The nonequilibrium diffusion enthalpy helper in `src/Thermo.cuh` computes `h_eq,s(T) - eps_ve,s(T) + eps_ve,s(Tve)`, which is exactly `h_tr,s(T) + eps_ve,s(Tve)`. The 2nd-order face kernels and the 8th-order collocated kernels in `src/ViscousScheme.cu` use this same expression for total energy. The 8th-order scalar kernel also explicitly writes the `rhoEve` viscous flux into `fFlux/gFlux/hFlux` before the 8th-order derivative is taken, so the `rhoEve` derivative does not read an old or unset flux value.
 
 The wall heat-flux post-processing in `src/PostProcess.cu` uses the same split:
 
@@ -109,12 +129,12 @@ q_tr = kappa_tr * n dot grad(T)
        + sum_s D_s^code * h_tr,s(T)
 
 q_ve = kappa_ve * n dot grad(Tve)
-       + sum_s D_s^code * E_ve,s(Tve)
+       + sum_s D_s^code * eps_ve,s(Tve)
 
 q_total = q_tr + q_ve
 ```
 
-A useful consistency check is not to add `q_ve` to a total-energy diffusion term that already used `h_tr,s(T) + E_ve,s(Tve)` for species diffusion; doing so would count `sum_s D_s^code * E_ve,s(Tve)` twice. `src/PostProcess.cu` keeps `q_tr` and `q_ve` separate first, then forms `q_total`.
+A useful consistency check is not to add `q_ve` to a total-energy diffusion term that already used `h_tr,s(T) + eps_ve,s(Tve)` for species diffusion; doing so would count `sum_s D_s^code * eps_ve,s(Tve)` twice. `src/PostProcess.cu` keeps `q_tr` and `q_ve` separate first, then forms `q_total`.
 
 The main implementation files are:
 
@@ -122,13 +142,34 @@ The main implementation files are:
 - `src/Parameter.cpp`, `src/DParameter.*`, `src/Field.*`: variable indexing, `Eve`, `Tve`, and storage.
 - `src/ChemData.*`, `src/Thermo.*`: NASA thermodynamics split into translational-rotational and vibrational-electronic parts, `two_temperature.dat`, and Landau-Teller data.
 - `src/FieldOperation.*`: conservative/primitive conversion, `Tve` inversion, total-energy closure, and exact exponential VT update.
-- `src/FiniteRateChem.cu`: `sum_s omega_s E_ve,s(Tve)` source and two-temperature reaction-control temperatures.
+- `src/FiniteRateChem.cu`: `sum_s omega_s eps_ve,s(Tve)` source and two-temperature reaction-control temperatures.
 - `src/InviscidScheme.cu`, `src/WENO.cu`: convective `rhoEve` flux and characteristic WENO projection.
 - `src/ViscousScheme.cu`: `Tve` conduction, `rhoEve` viscous flux, and nonequilibrium enthalpy in total-energy diffusion.
 - `src/PostProcess.cu`: wall `q_tr`, `q_ve`, and `q_total` split.
 - `src/RK.cuh`: RK3-stage VT relaxation.
 
-The detailed characteristic derivation and equation-to-code audit are in `docs/two_temperature_weno_characteristic_derivation.md`.
+The detailed characteristic derivation and equation-to-code audit are in `docs/two_temperature_weno_characteristic_derivation.pdf`; the LaTeX source is `docs/two_temperature_weno_characteristic_derivation.tex`.
+
+To restart the provided double-wedge checkpoint for a 100-step smoke test:
+
+```bash
+mkdir -p .codex_runs/doublewedge_2t_100
+rsync -a example/doubleWedge2019/input .codex_runs/doublewedge_2t_100/
+mkdir -p .codex_runs/doublewedge_2t_100/output/time_series .codex_runs/doublewedge_2t_100/output/message
+cp example/doubleWedge2019/output_before_doubletemp_perf_20260510_053541/time_series/flowfield_2.0425e-04s.plt \
+   .codex_runs/doublewedge_2t_100/output/flowfield.plt
+cp example/doubleWedge2019/output_before_doubletemp_perf_20260510_053541/message/step.txt \
+   .codex_runs/doublewedge_2t_100/output/message/step.txt
+```
+
+Set `input/setup.txt` in the run directory to `initial = 1`, `parallel = 1`, `fixed_time_step = 1`, `dt = 5e-10`, `total_step = 100`, and `total_simulation_time` later than `2.0425e-04 + 100 * 5e-10`. Then run with the two-temperature executable using two MPI processes:
+
+```bash
+cd .codex_runs/doublewedge_2t_100
+mpirun -np 2 /path/to/corefl
+```
+
+The restart file header should contain `Eve` and `Tve`; wall post-processing writes `q_tr`, `q_ve`, and `q_total`.
 
 ### The use of readGrid
 
@@ -204,7 +245,7 @@ mpirun -n 8 \ # total number of processes to be started
   --mca btl tcp,self \
   --mca btl_tcp_if_include eth0 \
   --mca pml ob1 \
-  --mca btl_base_warn_component_unused 0 \
+  --mca btl_tr_warn_component_unused 0 \
   --hostfile ${HOSTFILE} \
   /path/to/corefl
 ```
@@ -347,7 +388,7 @@ mpirun -n 1 \
   --mca btl tcp,self \
   --mca btl_tcp_if_include eth0 \
   --mca pml ob1 \
-  --mca btl_base_warn_component_unused 0 \
+  --mca btl_tr_warn_component_unused 0 \
   --hostfile ${HOSTFILE} \
   /home/bingxing2/home/scx6d0j/GuoXL/code/corefl-cpc/corefl # change the directory to your path to corefl.
 ```
@@ -380,7 +421,7 @@ real total_simulation_time = 2.4e-4 // We have data at 0.23ms, so we want the co
 Third, about the spatial schemes:
 
 ```c++
-int shock_sensor = 2   // Ducros sensor (0), modified Jameson sensor (1), sensor based on density and pressure jump (2)
+int shock_sensor = 2   // Ducros sensor (0), modified Jameson sensor (1), sensor trd on density and pressure jump (2)
 real shockSensor_threshold = -0.2 // A negative value means all points are computed by WENO scheme.
 int viscous_order = 2   // inviscid(0), 2nd order (2), 8th order (8)
 array int viscous_flux_tpb_2d {
@@ -402,7 +443,7 @@ Fourth, about the chemistry
 ```c++
 int species = 1     // Air (0), multi-component simulation (1)
 string mechanism_file = chemistry/H2PREMIX.inp  // The path is relative to the "input/" folder.
-int reaction = 1    // No reaction (0), Finite rate chemistry based on the mechanism (1)
+int reaction = 1    // No reaction (0), Finite rate chemistry trd on the mechanism (1)
 ```
 
 Fifth, about the boundary conditions.
@@ -477,4 +518,4 @@ I have to admit that, because I am a PhD student in the fifth year, a more detai
 
 Besides, the compilation and environment issues always occur. If there are troubles, please also contact me at the email. I really want my effort of 2-3 years to be used instead of protected in my own computer.
 
-Anyway, we have already conducted many researches based on our GPU code, which is much faster than the CPU codes. It is really fascinating to run a DNS within several days instead of weaks or months.
+Anyway, we have already conducted many researches trd on our GPU code, which is much faster than the CPU codes. It is really fascinating to run a DNS within several days instead of weaks or months.

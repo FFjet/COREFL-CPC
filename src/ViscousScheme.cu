@@ -567,21 +567,6 @@ template<MixtureModel mix_model, int ORDER> __global__ void compute_viscous_flux
   gv(i, j, k, 4) = eta_x * Ex + eta_y * Ey + eta_z * Ez;
   hv(i, j, k, 4) = zeta_x * Ex + zeta_y * Ey + zeta_z * Ez;
 
-  if constexpr (mix_model != MixtureModel::Air && kTwoTemperature) {
-    if (param->i_eve >= 0) {
-      const auto &tve_field = zone->temperature_ve;
-      const real tve_xi = d_dXi<ORDER>(tve_field, i, j, k, mx, compute_type[0], compute_type[1]);
-      const real tve_eta = d_dEta<ORDER>(tve_field, i, j, k, my, compute_type[2], compute_type[3]);
-      const real tve_zeta = d_dZeta<ORDER>(tve_field, i, j, k, mz, compute_type[4], compute_type[5]);
-      const real tve_x = tve_xi * xi_x + tve_eta * eta_x + tve_zeta * zeta_x;
-      const real tve_y = tve_xi * xi_y + tve_eta * eta_y + tve_zeta * zeta_y;
-      const real tve_z = tve_xi * xi_z + tve_eta * eta_z + tve_zeta * zeta_z;
-      const real conductivity_ve = zone->thermal_conductivity_ve(i, j, k);
-      fv(i, j, k, 4) += conductivity_ve * (xi_x * tve_x + xi_y * tve_y + xi_z * tve_z);
-      gv(i, j, k, 4) += conductivity_ve * (eta_x * tve_x + eta_y * tve_y + eta_z * tve_z);
-      hv(i, j, k, 4) += conductivity_ve * (zeta_x * tve_x + zeta_y * tve_y + zeta_z * tve_z);
-    }
-  }
 }
 
 template<int ORDER> __global__ void compute_viscous_flux_collocated_scalar(DZone *zone, const DParameter *param) {
@@ -720,13 +705,25 @@ template<int ORDER> __global__ void compute_viscous_flux_collocated_scalar(DZone
   }
 
   auto &fv = zone->fFlux, &gv = zone->gFlux, &hv = zone->hFlux;
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      fv(i, j, k, 4) += eve_flux_x;
+      gv(i, j, k, 4) += eve_flux_y;
+      hv(i, j, k, 4) += eve_flux_z;
+    }
+  }
   for (int l = 0; l < n_spec; ++l) {
     real h_diff = h[l];
     real eve_l = 0;
     if constexpr (kTwoTemperature) {
       if (param->i_eve >= 0) {
-        h_diff = compute_nonequilibrium_diffusion_enthalpy(h[l], l, tm, tve_m, param);
-        eve_l = compute_ve_energy(l, tve_m, param);
+        if (tve_m == tm) {
+          eve_l = compute_ve_energy(l, tm, param);
+        } else {
+          const real eve_l_eq = compute_ve_energy(l, tm, param);
+          eve_l = compute_ve_energy(l, tve_m, param);
+          h_diff = h[l] - eve_l_eq + eve_l;
+        }
       }
     }
 

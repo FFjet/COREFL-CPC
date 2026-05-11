@@ -304,15 +304,15 @@ real cfd::Species::compute_mixture_ve_energy(real t, const std::vector<real> &y,
 }
 
 real cfd::Species::invert_tve_from_eve(real eve_target, const std::vector<real> &y, real t_init) const {
+  constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
   real tve = std::max<real>(t_init, 1.0);
   for (int iter = 0; iter < 80; ++iter) {
     real cv_ve{};
     const real eve = compute_mixture_ve_energy(tve, y, &cv_ve);
     const real residual = eve - eve_target;
-    if (std::abs(residual) < 1e-8 * std::max<real>(1.0, std::abs(eve_target))) break;
-    const real denom = std::max<real>(cv_ve, 1e-8);
-    const real next_tve = std::max<real>(1.0, tve - residual / denom);
-    if (std::abs(next_tve - tve) < 1e-8 * std::max<real>(1.0, tve)) {
+    if (std::abs(residual) < tolerance * std::max<real>(1.0, std::abs(eve_target))) break;
+    const real next_tve = std::max<real>(1.0, tve - residual / std::max<real>(cv_ve, 1e-8));
+    if (std::abs(next_tve - tve) < tolerance * std::max<real>(1.0, tve)) {
       tve = next_tve;
       break;
     }

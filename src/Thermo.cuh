@@ -28,6 +28,10 @@ __device__ real compute_vib_cv(int i_spec, real t, const DParameter *param);
 
 __device__ real compute_mixture_ve_energy(real t, const real *y, const DParameter *param, real *cv_ve = nullptr);
 
+__device__ real compute_mixture_ve_cv(real t, const real *y, const DParameter *param);
+
+__device__ real compute_ve_energy_and_cv(int i_spec, real t, const DParameter *param, real *cv_ve);
+
 __device__ real compute_mixture_vib_energy(real t, const real *y, const DParameter *param, real *cv_v = nullptr);
 
 __device__ real compute_mixture_tr_energy(real t, const real *y, const DParameter *param, real *cv_tr = nullptr,
@@ -38,7 +42,7 @@ __device__ real invert_tve_from_ev(real ev_target, const real *y, real t_init, c
 __device__ real invert_tve_from_eve(real eve_target, const real *y, real t_init, const DParameter *param);
 
 __device__ real compute_vt_relaxation_source(real density, real t, real tve, const real *y, const DParameter *param,
-  real *eve_eq = nullptr, real *tau_eff = nullptr);
+  real *eve_eq = nullptr, real *tau_eff = nullptr, real *eve_current = nullptr);
 
 __device__ __forceinline__ real compute_nonequilibrium_diffusion_enthalpy(
   real h_eq, int i_spec, real t, real tve, const DParameter *param) {
@@ -58,13 +62,15 @@ __device__ __forceinline__ void compute_mixture_characteristic_thermo(
   real r_local = 0.0;
   real cp_local = 0.0;
   real cv_local = 0.0;
+  real h_tr_local[MAX_SPEC_NUMBER];
 
   for (int l = 0; l < param->n_spec; ++l) {
     const real yi = y[l];
-    const real eve_eq = compute_ve_energy(l, t_eval, param);
-    const real cv_ve_eq = compute_ve_cv(l, t_eval, param);
+    real cv_ve_eq{};
+    const real eve_eq = compute_ve_energy_and_cv(l, t_eval, param, &cv_ve_eq);
     const real h_tr_i = h_eq[l] - eve_eq;
     const real cp_tr_i = cp_eq[l] - cv_ve_eq;
+    h_tr_local[l] = h_tr_i;
     if (h_tr != nullptr) h_tr[l] = h_tr_i;
     e_tr_local += yi * (h_tr_i - param->gas_const[l] * t_eval);
     r_local += yi * param->gas_const[l];
@@ -97,7 +103,7 @@ __device__ __forceinline__ void compute_mixture_characteristic_thermo(
   const real inv_gm1 = 1.0 / max(gm1, static_cast<real>(1e-12));
 
   for (int l = 0; l < param->n_spec; ++l) {
-    const real h_tr_i = h_tr != nullptr ? h_tr[l] : h_eq[l] - compute_ve_energy(l, t_eval, param);
+    const real h_tr_i = h_tr_local[l];
     const real alpha = (gamma_local * param->gas_const[l] * t_eval - gm1 * h_tr_i) / c2;
     if (scalar_alpha != nullptr) scalar_alpha[l] = alpha;
     if (energy_coeff != nullptr) energy_coeff[l] = -alpha * c2 * inv_gm1;

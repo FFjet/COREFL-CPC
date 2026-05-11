@@ -15,7 +15,44 @@ __device__ constexpr real b[3]{0.0, 0.25, 2.0 / 3.0};
 __device__ constexpr real c[3]{1.0, 0.25, 2.0 / 3.0};
 }
 
+static constexpr int rk_outflow_bc_label = 6;
+
+__device__ __forceinline__ bool outflow_boundary_inner_cell(const DZone *zone, int i, int j, int k, int &ii, int &jj,
+  int &kk) {
+  ii = i;
+  jj = j;
+  kk = k;
+  if (i == 0 && zone->bType_il(j, k) == rk_outflow_bc_label) {
+    ii = 1;
+    return true;
+  }
+  if (i == zone->mx - 1 && zone->bType_ir(j, k) == rk_outflow_bc_label) {
+    ii = zone->mx - 2;
+    return true;
+  }
+  if (j == 0 && zone->bType_jl(i, k) == rk_outflow_bc_label) {
+    jj = 1;
+    return true;
+  }
+  if (j == zone->my - 1 && zone->bType_jr(i, k) == rk_outflow_bc_label) {
+    jj = zone->my - 2;
+    return true;
+  }
+  if (zone->mz > 1) {
+    if (k == 0 && zone->bType_kl(i, j) == rk_outflow_bc_label) {
+      kk = 1;
+      return true;
+    }
+    if (k == zone->mz - 1 && zone->bType_kr(i, j) == rk_outflow_bc_label) {
+      kk = zone->mz - 2;
+      return true;
+    }
+  }
+  return false;
+}
+
 template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone, DParameter *param, real dt, int rk);
+template<MixtureModel mix_model> __global__ void copy_outflow_boundary_from_inner(DZone *zone, DParameter *param);
 
 static __global__ void apply_vt_relaxation_rk(DZone *zone, DParameter *param, real dt_stage) {
   const int extent[3]{zone->mx, zone->my, zone->mz};
@@ -23,6 +60,8 @@ static __global__ void apply_vt_relaxation_rk(DZone *zone, DParameter *param, re
   const auto j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
   const auto k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
   if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+  int ii{}, jj{}, kk{};
+  if (outflow_boundary_inner_cell(zone, i, j, k, ii, jj, kk)) return;
 
   apply_vt_relaxation_1_point(zone, param, i, j, k, dt_stage);
 }
@@ -196,10 +235,12 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
         // update basic variables
         t_prof = profile_start();
         update_cv_and_bv_rk<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param, dt, rk);
+        copy_outflow_boundary_from_inner<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param);
         profile_stop(t_prof, prof_update_cv);
         if constexpr (kTwoTemperature) {
           t_prof = profile_start();
           apply_vt_relaxation_rk<<<bpg[b], tpb>>>(field[b].d_ptr, param, rk_stage_dt_scale[rk] * dt);
+          copy_outflow_boundary_from_inner<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param);
           profile_stop(t_prof, prof_vt);
         }
 
@@ -280,6 +321,8 @@ template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone
   const auto j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
   const auto k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
   if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+  int ii{}, jj{}, kk{};
+  if (outflow_boundary_inner_cell(zone, i, j, k, ii, jj, kk)) return;
 
   auto &cv = zone->cv;
   auto &qn = zone->qn;
@@ -364,5 +407,41 @@ template<MixtureModel mix_model> __global__ void update_cv_and_bv_rk(DZone *zone
     bv(i, j, k, 4) = (gamma_air - 1) * (cv(i, j, k, 4) - 0.5 * bv(i, j, k, 0) * V2);
     bv(i, j, k, 5) = bv(i, j, k, 4) * mw_air * density_inv / R_u;
   }
+}
+
+template<MixtureModel mix_model> __global__ void copy_outflow_boundary_from_inner(DZone *zone, DParameter *param) {
+  const int extent[3]{zone->mx, zone->my, zone->mz};
+  const auto i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const auto j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
+  const auto k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
+  if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+
+  int ii{}, jj{}, kk{};
+  if (!outflow_boundary_inner_cell(zone, i, j, k, ii, jj, kk)) return;
+
+  auto &cv = zone->cv;
+  auto &bv = zone->bv;
+  auto &sv = zone->sv;
+  for (int l = 0; l < param->n_var; ++l) {
+    cv(i, j, k, l) = cv(ii, jj, kk, l);
+  }
+  for (int l = 0; l < 6; ++l) {
+    bv(i, j, k, l) = bv(ii, jj, kk, l);
+  }
+  for (int l = 0; l < param->n_scalar; ++l) {
+    sv(i, j, k, l) = sv(ii, jj, kk, l);
+  }
+  if constexpr (mix_model != MixtureModel::Air) {
+    zone->gamma(i, j, k) = zone->gamma(ii, jj, kk);
+    zone->acoustic_speed(i, j, k) = zone->acoustic_speed(ii, jj, kk);
+    zone->thermal_conductivity(i, j, k) = zone->thermal_conductivity(ii, jj, kk);
+    if constexpr (kTwoTemperature) {
+      if (param->i_eve >= 0) {
+        zone->temperature_ve(i, j, k) = zone->temperature_ve(ii, jj, kk);
+        zone->thermal_conductivity_ve(i, j, k) = zone->thermal_conductivity_ve(ii, jj, kk);
+      }
+    }
+  }
+  zone->mach(i, j, k) = zone->mach(ii, jj, kk);
 }
 }

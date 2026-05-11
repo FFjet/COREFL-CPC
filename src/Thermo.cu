@@ -708,28 +708,78 @@ __device__ real cfd::compute_vib_cv(int i_spec, real t, const DParameter *param)
   return cv_v;
 }
 
+__device__ real cfd::compute_ve_energy_and_cv(int i_spec, real t, const DParameter *param, real *cv_ve) {
+  if (!param->two_temperature || i_spec < 0 || i_spec >= param->n_spec) {
+    if (cv_ve != nullptr) *cv_ve = 0.0;
+    return 0.0;
+  }
+  const real temp = max(t, static_cast<real>(1.0));
+  const real r_spec = param->gas_const[i_spec];
+  real e_ve = compute_vib_energy(i_spec, temp, param);
+  real cve = compute_vib_cv(i_spec, temp, param);
+
+  const int n_level = param->n_electronic_level[i_spec];
+  if (n_level > 0) {
+    real z = 0.0, b = 0.0, c = 0.0;
+    for (int j = 0; j < n_level; ++j) {
+      const real theta = param->electronic_theta(i_spec, j);
+      const real g = param->electronic_g(i_spec, j);
+      const real boltz = g * exp(-theta / temp);
+      z += boltz;
+      b += boltz * theta;
+      c += boltz * theta * theta;
+    }
+    if (z > 0) {
+      const real mean = b / z;
+      e_ve += r_spec * mean;
+      cve += r_spec * (c / z - mean * mean) / (temp * temp);
+    }
+  }
+
+  if (cv_ve != nullptr) *cv_ve = cve;
+  return e_ve;
+}
+
 __device__ real cfd::compute_mixture_ve_energy(real t, const real *y, const DParameter *param, real *cv_ve) {
   real eve = 0.0;
   real cve = 0.0;
   if (param->two_temperature) {
+    const bool need_cv = cv_ve != nullptr;
     for (int i = 0; i < param->n_spec; ++i) {
       const real yi = y[i];
-      eve += yi * compute_ve_energy(i, t, param);
-      cve += yi * compute_ve_cv(i, t, param);
+      if (need_cv) {
+        real cve_i{};
+        const real eve_i = compute_ve_energy_and_cv(i, t, param, &cve_i);
+        eve += yi * eve_i;
+        cve += yi * cve_i;
+      } else {
+        eve += yi * compute_ve_energy(i, t, param);
+      }
     }
   }
   if (cv_ve != nullptr) *cv_ve = cve;
   return eve;
 }
 
+__device__ real cfd::compute_mixture_ve_cv(real t, const real *y, const DParameter *param) {
+  real cve = 0.0;
+  if (param->two_temperature) {
+    for (int i = 0; i < param->n_spec; ++i) {
+      cve += y[i] * compute_ve_cv(i, t, param);
+    }
+  }
+  return cve;
+}
+
 __device__ real cfd::compute_mixture_vib_energy(real t, const real *y, const DParameter *param, real *cv_v) {
   real ev = 0.0;
   real cvv = 0.0;
   if (param->two_temperature) {
+    const bool need_cv = cv_v != nullptr;
     for (int i = 0; i < param->n_spec; ++i) {
       const real yi = y[i];
       ev += yi * compute_vib_energy(i, t, param);
-      cvv += yi * compute_vib_cv(i, t, param);
+      if (need_cv) cvv += yi * compute_vib_cv(i, t, param);
     }
   }
   if (cv_v != nullptr) *cv_v = cvv;
@@ -761,14 +811,15 @@ __device__ real cfd::compute_mixture_tr_energy(real t, const real *y, const DPar
 }
 
 __device__ real cfd::invert_tve_from_eve(real eve_target, const real *y, real t_init, const DParameter *param) {
+  constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
   real tve = max(t_init, static_cast<real>(1.0));
   for (int iter = 0; iter < 80; ++iter) {
     real cv_ve{};
     const real eve = compute_mixture_ve_energy(tve, y, param, &cv_ve);
     const real residual = eve - eve_target;
-    if (abs(residual) < 1e-8 * max(static_cast<real>(1.0), abs(eve_target))) break;
+    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(eve_target))) break;
     const real next_tve = max(static_cast<real>(1.0), tve - residual / max(cv_ve, static_cast<real>(1e-8)));
-    if (abs(next_tve - tve) < 1e-8 * max(static_cast<real>(1.0), tve)) {
+    if (abs(next_tve - tve) < tolerance * max(static_cast<real>(1.0), tve)) {
       tve = next_tve;
       break;
     }
@@ -778,14 +829,15 @@ __device__ real cfd::invert_tve_from_eve(real eve_target, const real *y, real t_
 }
 
 __device__ real cfd::invert_tve_from_ev(real ev_target, const real *y, real t_init, const DParameter *param) {
+  constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
   real tve = max(t_init, static_cast<real>(1.0));
   for (int iter = 0; iter < 80; ++iter) {
     real cv_v{};
     const real ev = compute_mixture_vib_energy(tve, y, param, &cv_v);
     const real residual = ev - ev_target;
-    if (abs(residual) < 1e-8 * max(static_cast<real>(1.0), abs(ev_target))) break;
+    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(ev_target))) break;
     const real next_tve = max(static_cast<real>(1.0), tve - residual / max(cv_v, static_cast<real>(1e-8)));
-    if (abs(next_tve - tve) < 1e-8 * max(static_cast<real>(1.0), tve)) {
+    if (abs(next_tve - tve) < tolerance * max(static_cast<real>(1.0), tve)) {
       tve = next_tve;
       break;
     }
@@ -854,10 +906,11 @@ __device__ __forceinline__ real compute_species_vt_relaxation_time(int i_vib, re
 }
 
 __device__ real cfd::compute_vt_relaxation_source(real density, real t, real tve, const real *y,
-  const DParameter *param, real *eve_eq, real *tau_eff) {
+  const DParameter *param, real *eve_eq, real *tau_eff, real *eve_current) {
   if (!param->two_temperature || density <= 0.0) {
     if (eve_eq != nullptr) *eve_eq = 0.0;
     if (tau_eff != nullptr) *tau_eff = 1e30;
+    if (eve_current != nullptr) *eve_current = 0.0;
     return 0.0;
   }
 
@@ -875,8 +928,8 @@ __device__ real cfd::compute_vt_relaxation_source(real density, real t, real tve
     const real yi = max(y[i], static_cast<real>(0.0));
     if (yi <= 0.0) continue;
 
-    const real e_eq_i = compute_vib_energy(i, t, param);
-    const real e_i = compute_vib_energy(i, tve, param);
+    const real e_eq_i = compute_ve_energy(i, t, param);
+    const real e_i = compute_ve_energy(i, tve, param);
     const real diff_i = e_eq_i - e_i;
     eve_eq_mix += yi * e_eq_i;
     eve_mix += yi * e_i;
@@ -889,6 +942,7 @@ __device__ real cfd::compute_vt_relaxation_source(real density, real t, real tve
   }
 
   if (eve_eq != nullptr) *eve_eq = eve_eq_mix;
+  if (eve_current != nullptr) *eve_current = eve_mix;
   if (tau_eff != nullptr) {
     const real diff_mix = eve_eq_mix - eve_mix;
     if (abs(diff_mix) > 1e-16 && abs(src) > 1e-16) {

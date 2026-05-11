@@ -8,8 +8,8 @@
 namespace cfd {
 #ifdef Combustion2Part
 namespace {
-real compute_mixture_vib_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
-                                     real *cv_v);
+real compute_mixture_ve_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
+                                    real *cv_ve = nullptr);
 }
 #endif
 
@@ -170,7 +170,7 @@ void const_volume_reactor(Parameter &parameter) {
         return;
       }
 
-      const real ev_old = compute_mixture_vib_energy_host(tve_state, y_state, species, nullptr);
+      const real ev_old = compute_mixture_ve_energy_host(tve_state, y_state, species, nullptr);
       const real alpha = std::exp(-dt_stage / std::max(src.tau_vt, static_cast<real>(1e-30)));
       const real ev_new = ev_old * alpha + src.eve_eq * (1.0 - alpha);
       rho_eve_state = std::max(rho_eve_state + rho * (ev_new - ev_old), static_cast<real>(0.0));
@@ -816,43 +816,6 @@ real reaction_temperature_host(real t, real tve, real a, real b, const cfd::Reac
   return smooth_reaction_temperature_host(std::pow(t_safe, a) * std::pow(tve_safe, b));
 }
 
-real compute_vib_energy_host(int i_spec, real t, const cfd::Species &species) {
-  if (!species.has_two_temperature_data || i_spec < 0 || i_spec >= species.n_spec) return 0.0;
-  const real temp = std::max<real>(t, 1.0);
-  const real theta = species.theta_v[i_spec];
-  if (theta <= 0.0) return 0.0;
-  const real x = theta / temp;
-  if (x >= 200.0) return 0.0;
-  const real r_spec = cfd::R_u / species.mw[i_spec];
-  return r_spec * theta / std::expm1(x);
-}
-
-real compute_vib_cv_host(int i_spec, real t, const cfd::Species &species) {
-  if (!species.has_two_temperature_data || i_spec < 0 || i_spec >= species.n_spec) return 0.0;
-  const real temp = std::max<real>(t, 1.0);
-  const real theta = species.theta_v[i_spec];
-  if (theta <= 0.0) return 0.0;
-  const real x = theta / temp;
-  if (x >= 200.0) return 0.0;
-  const real ex = std::exp(x);
-  const real denom = ex - 1.0;
-  const real r_spec = cfd::R_u / species.mw[i_spec];
-  return r_spec * x * x * ex / (denom * denom);
-}
-
-real compute_mixture_vib_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
-                                     real *cv_v = nullptr) {
-  real ev = 0.0;
-  real cv = 0.0;
-  for (int i = 0; i < species.n_spec; ++i) {
-    const real yi = i < static_cast<int>(y.size()) ? y[i] : 0.0;
-    ev += yi * compute_vib_energy_host(i, t, species);
-    cv += yi * compute_vib_cv_host(i, t, species);
-  }
-  if (cv_v != nullptr) *cv_v = cv;
-  return ev;
-}
-
 real compute_ve_energy_host(int i_spec, real t, const cfd::Species &species) {
   return species.compute_ve_energy(i_spec, t);
 }
@@ -862,7 +825,7 @@ real compute_ve_cv_host(int i_spec, real t, const cfd::Species &species) {
 }
 
 real compute_mixture_ve_energy_host(real t, const std::vector<real> &y, const cfd::Species &species,
-                                    real *cv_ve = nullptr) {
+                                    real *cv_ve) {
   return species.compute_mixture_ve_energy(t, y, cv_ve);
 }
 
@@ -972,8 +935,8 @@ real compute_vt_relaxation_source(real density, real t, real tve, const std::vec
     const real yi = std::max(y[i], static_cast<real>(0.0));
     if (yi <= 0.0) continue;
 
-    const real e_eq_i = compute_vib_energy_host(i, t, species);
-    const real e_i = compute_vib_energy_host(i, tve, species);
+    const real e_eq_i = compute_ve_energy_host(i, t, species);
+    const real e_i = compute_ve_energy_host(i, tve, species);
     const real diff_i = e_eq_i - e_i;
     eve_eq_mix += yi * e_eq_i;
     eve_mix += yi * e_i;
