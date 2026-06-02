@@ -79,6 +79,7 @@ example/**/input/*.png
 # Temporary local source copies and scratch files
 /srcold/
 /srcgxlnew/
+/srcgxlnewnew/
 /tmp/
 /scratch/
 /.codex_runs/
@@ -91,11 +92,19 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.cache/
 .coverage
+.coverage.*
 htmlcov/
 .venv/
 venv/
 env/
+pip-wheel-metadata/
+*.egg-info/
 
 # Documentation builds
 docs/build/

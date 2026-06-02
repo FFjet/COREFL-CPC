@@ -15,7 +15,7 @@ __device__ void weno_ch_air_x(const DParameter *param, const real **shared_mem, 
   auto Q = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(shared_mem);
   // rho, rhoU, rhoV, rhoW, rhoE, rhoY1, rhoY2, ...
   // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
+  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac
   auto F = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(shared_mem + n_var * (nx_block + 2 * 4 - 1));
 
   // Compute the Roe average state at the interface
@@ -70,8 +70,8 @@ __device__ void weno_ch_air_x(const DParameter *param, const real **shared_mem, 
     // Find the max spectral radius
     real max_lambda = 0;
     for (int m = 0; m < 8; ++m) {
-      if (real lam = abs(F[0][baseP + m]) + F[5][baseP + m]; lam > max_lambda) {
-        // if (real lam = F[5][baseP + m]; lam > max_lambda) {
+      const int p = baseP + m;
+      if (const real lam = F[6][p] * (abs(F[0][p]) + F[5][p]); lam > max_lambda) {
         max_lambda = lam;
       }
     }
@@ -123,29 +123,28 @@ __device__ void weno_ch_air_x(const DParameter *param, const real **shared_mem, 
       }
 
       real vPlus[7] = {}, vMinus[7] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
       int iP = i_shared - 3;
       real LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                  + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
       real LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-      // vPlus[0] = 0.5 * F[6][iP] * (LFm + abs(F[0][iP] + F[5][iP]) * LQm);
+      LFm *= F[6][iP];
+      vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
       for (int m = 1; m < 7; ++m) {
         iP = i_shared - 3 + m;
         LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
               + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
         LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-        // vPlus[m] = 0.5 * F[6][iP] * (LFm + abs(F[0][iP] + F[5][iP]) * LQm);
-        // vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - abs(F[0][iP] + F[5][iP]) * LQm);
-        vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+        vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
       }
       iP = i_shared - 3 + 7;
       LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
             + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
       LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      // vMinus[6] = 0.5 * F[6][iP] * (LFm - abs(F[0][iP] + F[5][iP]) * LQm);
-      vMinus[6] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+      LFm *= F[6][iP];
+      vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
       fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
     }
   } else if (param->inviscid_scheme == 52) {
@@ -154,8 +153,8 @@ __device__ void weno_ch_air_x(const DParameter *param, const real **shared_mem, 
     // Find the max spectral radius
     real max_lambda = 0;
     for (int m = 0; m < 6; ++m) {
-      if (real lam = abs(F[0][baseP + m]) + F[5][baseP + m]; lam > max_lambda) {
-        // if (real lam = F[5][baseP + m]; lam > max_lambda) {
+      const int p = baseP + m;
+      if (const real lam = F[6][p] * (abs(F[0][p]) + F[5][p]); lam > max_lambda) {
         max_lambda = lam;
       }
     }
@@ -207,194 +206,29 @@ __device__ void weno_ch_air_x(const DParameter *param, const real **shared_mem, 
       }
 
       real vPlus[5] = {}, vMinus[5] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
       int iP = i_shared - 2;
       real LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                  + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
       real LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
+      LFm *= F[6][iP];
+      vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
       for (int m = 1; m < 5; ++m) {
         iP = i_shared - 2 + m;
         LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
               + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
         LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-        vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+        vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
       }
       iP = i_shared + 3;
       LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
             + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
       LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      vMinus[4] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+      LFm *= F[6][iP];
+      vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
       fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
-    }
-  }
-  // Project the flux back to physical space
-  // We do not compute the right characteristic matrix here, because we explicitly write the components below.
-  temp1 = fChar[0] + fChar[3] + fChar[4];
-  temp3 = fChar[0] - fChar[4];
-  fc[idx3d] = temp1;
-  fc[idx3d + 1 * sz3d] = um * temp1 - kx * cm * temp3 + nx * fChar[1] + qx * fChar[2];
-  fc[idx3d + 2 * sz3d] = vm * temp1 - ky * cm * temp3 + ny * fChar[1] + qy * fChar[2];
-  fc[idx3d + 3 * sz3d] = wm * temp1 - kz * cm * temp3 + nz * fChar[1] + qz * fChar[2];
-
-  // temp2 is Roe averaged enthalpy
-  temp2 = rlc * (Q[4][i_shared] + F[4][i_shared]) + rrc * (Q[4][i_shared + 1] + F[4][i_shared + 1]);
-  fc[idx3d + 4 * sz3d] = temp2 * temp1 - Uk_bar * cm * temp3 + Un * fChar[1] + Uq * fChar[2] - cm * cm / gm1 * fChar[3];
-}
-
-__device__ void weno_ch_air_x_piro(const DParameter *param, const real **shared_mem, int i_shared, real kx, real ky,
-  real kz,
-  real eps_ref, bool if_shock, real *fc, int idx3d, int sz3d) {
-  constexpr int nx_block = 64;
-  const int n_var = param->n_var;
-
-  auto Q = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(shared_mem);
-  // rho, rhoU, rhoV, rhoW, rhoE, rhoY1, rhoY2, ...
-  // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
-  auto F = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(shared_mem + n_var * (nx_block + 2 * 4 - 1));
-
-  // Compute the Roe average state at the interface
-  real rho_l = Q[0][i_shared], rho_r = Q[0][i_shared + 1];
-  real temp1 = sqrt(rho_l * rho_r); // temp1 is sqrt(rhoL*rhoR), only used in the next two lines.
-  const real rlc{1 / (rho_l + temp1)};
-  const real rrc{1 / (temp1 + rho_r)};
-  const real um{rlc * Q[1][i_shared] + rrc * Q[1][i_shared + 1]};
-  const real vm{rlc * Q[2][i_shared] + rrc * Q[2][i_shared + 1]};
-  const real wm{rlc * Q[3][i_shared] + rrc * Q[3][i_shared + 1]};
-  real temp3 = (rlc * F[4][i_shared] + rrc * F[4][i_shared + 1]) / R_air; // temp3 = T
-  const real cm = sqrt(gamma_air * R_air * temp3);
-  constexpr real gm1{gamma_air - 1};
-
-  // Next, we compute the left characteristic matrix at i+1/2.
-  // real max_lambda = abs(kx * um + ky * vm + kz * wm);
-  temp1 = rnorm3d(kx, ky, kz); // temp1 is the norm of the unit normal vector
-  // max_lambda += cm / temp1;
-  kx *= temp1;
-  ky *= temp1;
-  kz *= temp1;
-  const real Uk_bar{kx * um + ky * vm + kz * wm};
-  real nx{0}, ny{0}, nz{0}, qx{0}, qy{0}, qz{0};
-  if (abs(kx) > 0.8) {
-    nx = -kz;
-    nz = kx;
-  } else {
-    ny = kz;
-    nz = -ky;
-  }
-  temp1 = rnorm3d(nx, ny, nz); // temp1 is the norm of the unit normal vector
-  nx *= temp1;
-  ny *= temp1;
-  nz *= temp1;
-  qx = ky * nz - kz * ny;
-  qy = kz * nx - kx * nz;
-  qz = kx * ny - ky * nx;
-  temp1 = rnorm3d(qx, qy, qz); // temp1 is the norm of the unit normal vector
-  qx *= temp1;
-  qy *= temp1;
-  qz *= temp1;
-  const real Un = nx * um + ny * vm + nz * wm;
-  const real Uq = qx * um + qy * vm + qz * wm;
-
-  real temp2 = 1.0 / (cm * cm); // temp2 is 1/(c^2), used in the next loop.
-  // Local Lax-Friedrichs flux splitting
-  temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
-  real fChar[5];
-  if (param->inviscid_scheme == 72) {
-    const int baseP = i_shared - 3;
-
-    // Find the max spectral radius
-    real max_lambda2 = 0;
-    for (int m = 0; m < 8; ++m) {
-      if (real lam = abs(F[0][baseP + m]); lam > max_lambda2) {
-        max_lambda2 = lam;
-      }
-    }
-
-    for (int l = 0; l < 5; ++l) {
-      temp1 = 0.5;
-      real L[5];
-      switch (l) {
-        case 0:
-          L[0] = (temp3 + Uk_bar * cm) * temp2 * 0.5;
-          L[1] = -(gm1 * um + kx * cm) * temp2 * 0.5;
-          L[2] = -(gm1 * vm + ky * cm) * temp2 * 0.5;
-          L[3] = -(gm1 * wm + kz * cm) * temp2 * 0.5;
-          L[4] = gm1 * temp2 * 0.5;
-          break;
-        case 1:
-          temp1 = 0;
-          L[0] = -Un;
-          L[1] = nx;
-          L[2] = ny;
-          L[3] = nz;
-          L[4] = 0;
-          break;
-        case 2:
-          temp1 = 0;
-          L[0] = -Uq;
-          L[1] = qx;
-          L[2] = qy;
-          L[3] = qz;
-          L[4] = 0;
-          break;
-        case 3:
-          temp1 = -1;
-          L[0] = 1 - temp3 * temp2;
-          L[1] = gm1 * um * temp2;
-          L[2] = gm1 * vm * temp2;
-          L[3] = gm1 * wm * temp2;
-          L[4] = -gm1 * temp2;
-          break;
-        case 4:
-          L[0] = (temp3 - Uk_bar * cm) * temp2 * 0.5;
-          L[1] = -(gm1 * um - kx * cm) * temp2 * 0.5;
-          L[2] = -(gm1 * vm - ky * cm) * temp2 * 0.5;
-          L[3] = -(gm1 * wm - kz * cm) * temp2 * 0.5;
-          L[4] = gm1 * temp2 * 0.5;
-          break;
-        default:
-          break;
-      }
-      real max_lambda = max_lambda2;
-      if (l == 0) {
-        max_lambda = 0;
-        for (int m = 0; m < 8; ++m) {
-          if (real lam = abs(F[0][baseP + m] - F[5][baseP + m]); lam > max_lambda) {
-            max_lambda = lam;
-          }
-        }
-      } else if (l == 4) {
-        max_lambda = 0;
-        for (int m = 0; m < 8; ++m) {
-          if (real lam = abs(F[0][baseP + m] + F[5][baseP + m]); lam > max_lambda) {
-            max_lambda = lam;
-          }
-        }
-      }
-
-      real vPlus[7] = {}, vMinus[7] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
-      int iP = i_shared - 3;
-      real LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
-                 + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
-      real LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-      for (int m = 1; m < 7; ++m) {
-        iP = i_shared - 3 + m;
-        LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
-              + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
-        LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-        vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
-      }
-      iP = i_shared - 3 + 7;
-      LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
-            + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]);
-      LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP];
-      vMinus[6] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
-      fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
     }
   }
   // Project the flux back to physical space
@@ -419,7 +253,7 @@ __device__ void weno_ch_air_yz(const DParameter *param, const real **shared_mem,
 
   auto Q = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(shared_mem);
   // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
+  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac
   auto F = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(shared_mem + n_var * (nyy + 2 * 4 - 1) * 4);
 
   // Compute the Roe average state at the interface
@@ -474,8 +308,8 @@ __device__ void weno_ch_air_yz(const DParameter *param, const real **shared_mem,
     // Find the max spectral radius
     real max_lambda = 0;
     for (int m = 0; m < 8; ++m) {
-      if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
-        // if (real lam = F[5][baseP + m][tx]; lam > max_lambda) {
+      const int p = baseP + m;
+      if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
         max_lambda = lam;
       }
     }
@@ -527,32 +361,31 @@ __device__ void weno_ch_air_yz(const DParameter *param, const real **shared_mem,
       }
 
       real vPlus[7] = {}, vMinus[7] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
       int iP = i_shared - 3;
       real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx]
                  + L[3] * F[3][iP][tx] + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
       real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
                  + L[4] * Q[4][iP][tx];
-      vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-      // vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
+      LFm *= F[6][iP][tx];
+      vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
       for (int m = 1; m < 7; ++m) {
         iP = i_shared - 3 + m;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
               + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
               + L[4] * Q[4][iP][tx];
-        // vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-        // vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-        vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+        vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
       }
       iP = i_shared - 3 + 7;
       LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
             + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
       LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
             + L[4] * Q[4][iP][tx];
-      // vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-      vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+      LFm *= F[6][iP][tx];
+      vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
       fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
     }
   } else if (param->inviscid_scheme == 52) {
@@ -561,8 +394,8 @@ __device__ void weno_ch_air_yz(const DParameter *param, const real **shared_mem,
     // Find the max spectral radius
     real max_lambda = 0;
     for (int m = 0; m < 6; ++m) {
-      if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
-        // if (real lam = F[5][baseP + m][tx]; lam > max_lambda) {
+      const int p = baseP + m;
+      if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
         max_lambda = lam;
       }
     }
@@ -614,203 +447,32 @@ __device__ void weno_ch_air_yz(const DParameter *param, const real **shared_mem,
       }
 
       real vPlus[5] = {}, vMinus[5] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
       int iP = i_shared - 2;
       real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx]
                  + L[3] * F[3][iP][tx] + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
       real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
                  + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx];
-      vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+      LFm *= F[6][iP][tx];
+      vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
       for (int m = 1; m < 5; ++m) {
         iP = i_shared - 2 + m;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
               + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
               + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx];
-        vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+        vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
       }
       iP = i_shared + 3;
       LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
             + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
       LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
             + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx];
-      vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+      LFm *= F[6][iP][tx];
+      vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
       fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
-    }
-  }
-  // Project the flux back to physical space
-  // We do not compute the right characteristic matrix here, because we explicitly write the components below.
-  temp1 = fChar[0] + fChar[3] + fChar[4];
-  temp3 = fChar[0] - fChar[4];
-  fc[idx3d] = temp1;
-  fc[idx3d + 1 * sz3d] = um * temp1 - kx * cm * temp3 + nx * fChar[1] + qx * fChar[2];
-  fc[idx3d + 2 * sz3d] = vm * temp1 - ky * cm * temp3 + ny * fChar[1] + qy * fChar[2];
-  fc[idx3d + 3 * sz3d] = wm * temp1 - kz * cm * temp3 + nz * fChar[1] + qz * fChar[2];
-
-  // temp2 is Roe averaged enthalpy
-  temp2 = rlc * (Q[4][i_shared][tx] + F[4][i_shared][tx]) + rrc * (Q[4][i_shared + 1][tx] + F[4][i_shared + 1][tx]);
-  fc[idx3d + 4 * sz3d] = temp2 * temp1 - Uk_bar * cm * temp3 + Un * fChar[1] + Uq * fChar[2] - cm * cm / gm1 * fChar[3];
-}
-
-__device__ void weno_ch_air_yz_piro(const DParameter *param, const real **shared_mem, int i_shared, real kx, real ky,
-  real kz, real eps_ref, bool if_shock, real *fc, int idx3d, int sz3d) {
-  constexpr int nyy = 32;
-  const int n_var = param->n_var;
-  const auto tx = static_cast<int>(threadIdx.x);
-
-  auto Q = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(shared_mem);
-  // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
-  auto F = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(shared_mem + n_var * (nyy + 2 * 4 - 1) * 4);
-
-  // Compute the Roe average state at the interface
-  real rho_l = Q[0][i_shared][tx], rho_r = Q[0][i_shared + 1][tx];
-  real temp1 = sqrt(rho_l * rho_r); // temp1 is sqrt(rhoL*rhoR), only used in the next two lines.
-  const real rlc{1 / (rho_l + temp1)};
-  const real rrc{1 / (temp1 + rho_r)};
-  const real um{rlc * Q[1][i_shared][tx] + rrc * Q[1][i_shared + 1][tx]};
-  const real vm{rlc * Q[2][i_shared][tx] + rrc * Q[2][i_shared + 1][tx]};
-  const real wm{rlc * Q[3][i_shared][tx] + rrc * Q[3][i_shared + 1][tx]};
-  real temp3 = (rlc * F[4][i_shared][tx] + rrc * F[4][i_shared + 1][tx]) / R_air; // temp3 = T
-  const real cm = sqrt(gamma_air * R_air * temp3);
-  const real gm1{gamma_air - 1};
-
-  // Next, we compute the left characteristic matrix at i+1/2.
-  // real max_lambda = abs(kx * um + ky * vm + kz * wm);
-  temp1 = rnorm3d(kx, ky, kz); // temp1 is the norm of the unit normal vector
-  // max_lambda += cm / temp1;
-  kx *= temp1;
-  ky *= temp1;
-  kz *= temp1;
-  const real Uk_bar{kx * um + ky * vm + kz * wm};
-  real nx{0}, ny{0}, nz{0}, qx{0}, qy{0}, qz{0};
-  if (abs(kx) > 0.8) {
-    nx = -kz;
-    nz = kx;
-  } else {
-    ny = kz;
-    nz = -ky;
-  }
-  temp1 = rnorm3d(nx, ny, nz); // temp1 is the norm of the unit normal vector
-  nx *= temp1;
-  ny *= temp1;
-  nz *= temp1;
-  qx = ky * nz - kz * ny;
-  qy = kz * nx - kx * nz;
-  qz = kx * ny - ky * nx;
-  temp1 = rnorm3d(qx, qy, qz); // temp1 is the norm of the unit normal vector
-  qx *= temp1;
-  qy *= temp1;
-  qz *= temp1;
-  const real Un = nx * um + ny * vm + nz * wm;
-  const real Uq = qx * um + qy * vm + qz * wm;
-
-  real temp2 = 1.0 / (cm * cm); // temp2 is 1/(c^2), used in the next loop.
-  // Local Lax-Friedrichs flux splitting
-  temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
-  real fChar[5 + MAX_SPEC_NUMBER];
-  if (param->inviscid_scheme == 72) {
-    const int baseP = i_shared - 3;
-
-    // Find the max spectral radius
-    real max_lambda2 = 0;
-    for (int m = 0; m < 8; ++m) {
-      if (real lam = abs(F[0][baseP + m][tx]); lam > max_lambda2) {
-        max_lambda2 = lam;
-      }
-    }
-
-    for (int l = 0; l < 5; ++l) {
-      temp1 = 0.5;
-      real L[5];
-      switch (l) {
-        case 0:
-          L[0] = (temp3 + Uk_bar * cm) * temp2 * 0.5;
-          L[1] = -(gm1 * um + kx * cm) * temp2 * 0.5;
-          L[2] = -(gm1 * vm + ky * cm) * temp2 * 0.5;
-          L[3] = -(gm1 * wm + kz * cm) * temp2 * 0.5;
-          L[4] = gm1 * temp2 * 0.5;
-          break;
-        case 1:
-          temp1 = 0;
-          L[0] = -Un;
-          L[1] = nx;
-          L[2] = ny;
-          L[3] = nz;
-          L[4] = 0;
-          break;
-        case 2:
-          temp1 = 0;
-          L[0] = -Uq;
-          L[1] = qx;
-          L[2] = qy;
-          L[3] = qz;
-          L[4] = 0;
-          break;
-        case 3:
-          temp1 = -1;
-          L[0] = 1 - temp3 * temp2;
-          L[1] = gm1 * um * temp2;
-          L[2] = gm1 * vm * temp2;
-          L[3] = gm1 * wm * temp2;
-          L[4] = -gm1 * temp2;
-          break;
-        case 4:
-          L[0] = (temp3 - Uk_bar * cm) * temp2 * 0.5;
-          L[1] = -(gm1 * um - kx * cm) * temp2 * 0.5;
-          L[2] = -(gm1 * vm - ky * cm) * temp2 * 0.5;
-          L[3] = -(gm1 * wm - kz * cm) * temp2 * 0.5;
-          L[4] = gm1 * temp2 * 0.5;
-          break;
-        default:
-          break;
-      }
-      real max_lambda = max_lambda2;
-      if (l == 0) {
-        max_lambda = 0;
-        for (int m = 0; m < 8; ++m) {
-          if (real lam = abs(F[0][baseP + m][tx] - F[5][baseP + m][tx]); lam > max_lambda) {
-            max_lambda = lam;
-          }
-        }
-      } else if (l == 4) {
-        max_lambda = 0;
-        for (int m = 0; m < 8; ++m) {
-          if (real lam = abs(F[0][baseP + m][tx] + F[5][baseP + m][tx]); lam > max_lambda) {
-            max_lambda = lam;
-          }
-        }
-      }
-
-      real vPlus[7] = {}, vMinus[7] = {};
-      // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
-      int iP = i_shared - 3;
-      real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx]
-                 + L[3] * F[3][iP][tx] + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
-      real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
-                 + L[4] * Q[4][iP][tx];
-      vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-      // vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-      for (int m = 1; m < 7; ++m) {
-        iP = i_shared - 3 + m;
-        LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
-              + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
-        LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
-              + L[4] * Q[4][iP][tx];
-        // vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-        // vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-        vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-        vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
-      }
-      iP = i_shared - 3 + 7;
-      LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
-            + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]);
-      LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx]
-            + L[4] * Q[4][iP][tx];
-      // vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - abs(F[0][iP][tx] + F[5][iP][tx]) * LQm);
-      vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
-      fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
     }
   }
   // Project the flux back to physical space
@@ -853,12 +515,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
     in_sponge = true;
   }
 
-  int left_bound = -100, right_bound = -100;
-  if (i < 3 && zone->bType_il(j, k) != 0)
-    left_bound = i;
-  if (i > zone->mx - 5 && zone->bType_ir(j, k) != 0)
-    right_bound = i;
-
   extern __shared__ real s[];
 
   const auto &cv = zone->cv;
@@ -889,9 +545,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
   // if (if_shock) {
   eps_ref = eps_weno * param->weno_eps_scale; // * 0.25 * (kxJ * kxJ + kyJ * kyJ + kzJ * kzJ);
   // }
-  real kx = 0.5 * (zone->metric(i, j, k, 0) + zone->metric(i + 1, j, k, 0));
-  real ky = 0.5 * (zone->metric(i, j, k, 1) + zone->metric(i + 1, j, k, 1));
-  real kz = 0.5 * (zone->metric(i, j, k, 2) + zone->metric(i + 1, j, k, 2));
+  real kx = kxJ;
+  real ky = kyJ;
+  real kz = kzJ;
 
   if (const auto sch = param->inviscid_scheme;
       (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
@@ -976,7 +632,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         vm[5] = fm[l][i_shared + 3];
         vm[6] = fm[l][i_shared + 4];
 
-        // fc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->mx);
         fc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
       } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
@@ -1097,7 +752,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
   // characteristic method
   auto Q = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(s); // rho, rhoU, rhoV, rhoW, rhoE, rhoY1, rhoY2, ...
   // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
+  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac
   auto F = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(s + n_var * (nx_block + 2 * 4 - 1));
 
   for (int il = il0 + tx; il <= il0 + n_point - 1; il += n_active) {
@@ -1138,15 +793,11 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
       cGradK *= acoustic_speed_data[idx3d];
     else
       cGradK *= sqrt(gamma_air * R_air * bv_data[idx3d + 5 * sz_3d]);
-    // const real lambda0 = abs(Uk) + cGradK;
-    // F[5][iSh] = lambda0;
     F[5][iSh] = cGradK;
     F[6][iSh] = jac_data[idx3d];
   }
   __syncthreads();
   if constexpr (mix_model == MixtureModel::Air) {
-    // weno_ch_air_x_piro(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, fc.data(),
-    //               fc.idx3d(i, j, k), fc.size());
     weno_ch_air_x(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, fc.data(),
                   fc.idx3d(i, j, k), fc.size());
   } else {
@@ -1220,7 +871,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 8; ++m) {
-        if (real lam = abs(F[0][baseP + m]) + F[5][baseP + m]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p] * (abs(F[0][p]) + F[5][p]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -1285,28 +937,31 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         }
 
         real vPlus[7] = {}, vMinus[7] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 3;
         real LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                    + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[0];
         real LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
                    + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                 + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[m];
           LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
                 + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
               + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[7];
         LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
               + temp1 * sumBetaQ[7];
-        vMinus[6] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -1314,18 +969,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         int iP = i_shared - 3;
         real LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
         real LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-        vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
           LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-          vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
         LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-        vMinus[6] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
     } else if (param->inviscid_scheme == 52) {
@@ -1334,7 +992,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 6; ++m) {
-        if (real lam = abs(F[0][baseP + m]) + F[5][baseP + m]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p] * (abs(F[0][p]) + F[5][p]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -1399,28 +1058,31 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         }
 
         real vPlus[5] = {}, vMinus[5] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 2;
         real LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                    + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[0];
         real LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
                    + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
                 + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[m];
           LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
                 + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = L[0] * (Q[0][iP] * F[0][iP]) + L[1] * F[1][iP] + L[2] * F[2][iP] + L[3] * F[3][iP]
               + L[4] * ((Q[4][iP] + F[4][iP]) * F[0][iP]) + temp1 * sumBetaF[5];
         LQm = L[0] * Q[0][iP] + L[1] * Q[1][iP] + L[2] * Q[2][iP] + L[3] * Q[3][iP] + L[4] * Q[4][iP]
               + temp1 * sumBetaQ[5];
-        vMinus[4] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -1428,18 +1090,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
         int iP = i_shared - 2;
         real LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
         real LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-        vPlus[0] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
           LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-          vPlus[m] = 0.5 * F[6][iP] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = F[0][iP] * (Q[5 + l][iP] - svm[l] * Q[0][iP]);
         LQm = Q[5 + l][iP] - svm[l] * Q[0][iP];
-        vMinus[4] = 0.5 * F[6][iP] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
     }
@@ -1590,12 +1255,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
     in_sponge = true;
   }
 
-  int left_bound = -100, right_bound = -100;
-  if (j < 3 && zone->bType_jl(i, k) != 0)
-    left_bound = j;
-  if (j > zone->my - 5 && zone->bType_jr(i, k) != 0)
-    right_bound = j;
-
   extern __shared__ real s[];
 
   const auto &cv = zone->cv;
@@ -1626,9 +1285,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
   // if (if_shock) {
   eps_ref = eps_weno * param->weno_eps_scale; // * 0.25 * (kxJ * kxJ + kyJ * kyJ + kzJ * kzJ);
   // }
-  real kx = 0.5 * (zone->metric(i, j, k, 3) + zone->metric(i, j + 1, k, 3));
-  real ky = 0.5 * (zone->metric(i, j, k, 4) + zone->metric(i, j + 1, k, 4));
-  real kz = 0.5 * (zone->metric(i, j, k, 5) + zone->metric(i, j + 1, k, 5));
+  real kx = kxJ;
+  real ky = kyJ;
+  real kz = kzJ;
 
   if (const auto sch = param->inviscid_scheme;
       (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
@@ -1712,7 +1371,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         vm[5] = fm[l][i_shared + 3][tx];
         vm[6] = fm[l][i_shared + 4][tx];
 
-        // gc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->my);
         gc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
       } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
@@ -1762,9 +1420,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
       real q1 = cv_data[idx3d + 1 * sz_3d];
       real q2 = cv_data[idx3d + 2 * sz_3d];
       real q3 = cv_data[idx3d + 3 * sz_3d];
-      real metric0 = metric_data[idx3d + 0 * sz_3d];
-      real metric1 = metric_data[idx3d + 1 * sz_3d];
-      real metric2 = metric_data[idx3d + 2 * sz_3d];
+      real metric0 = metric_data[idx3d + 3 * sz_3d];
+      real metric1 = metric_data[idx3d + 4 * sz_3d];
+      real metric2 = metric_data[idx3d + 5 * sz_3d];
       real cGradK = norm3d(metric0, metric1, metric2);
       if constexpr (mix_model != MixtureModel::Air)
         cGradK *= acoustic_speed_data[idx3d];
@@ -1778,9 +1436,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
       q1 = cv_data[idx3d + 1 * sz_3d];
       q2 = cv_data[idx3d + 2 * sz_3d];
       q3 = cv_data[idx3d + 3 * sz_3d];
-      metric0 = metric_data[idx3d + 0 * sz_3d];
-      metric1 = metric_data[idx3d + 1 * sz_3d];
-      metric2 = metric_data[idx3d + 2 * sz_3d];
+      metric0 = metric_data[idx3d + 3 * sz_3d];
+      metric1 = metric_data[idx3d + 4 * sz_3d];
+      metric2 = metric_data[idx3d + 5 * sz_3d];
       cGradK = norm3d(metric0, metric1, metric2);
       if constexpr (mix_model != MixtureModel::Air)
         cGradK *= acoustic_speed_data[idx3d];
@@ -1833,7 +1491,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
   // Characteristic method
   auto Q = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s);
   // F stores temporary values, including
-  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac
+  // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac
   auto F = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s + n_var * (nyy + 2 * 4 - 1) * 4);
 
   for (int jl = jl0 + ty; jl <= jl0 + n_point - 1; jl += n_active) {
@@ -1874,16 +1532,12 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
       cGradK *= acoustic_speed_data[idx3d];
     else
       cGradK *= sqrt(gamma_air * R_air * bv_data[idx3d + 5 * sz_3d]);
-    // const real lambda0 = abs(Uk) + cGradK;
-    // F[5][iSh][tx] = lambda0;
     F[5][iSh][tx] = cGradK;
     F[6][iSh][tx] = jac_data[idx3d];
   }
   __syncthreads();
 
   if constexpr (mix_model == MixtureModel::Air) {
-    // weno_ch_air_yz_piro(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, gc.data(),
-    //                gc.idx3d(i, j, k), gc.size());
     weno_ch_air_yz(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, gc.data(),
                    gc.idx3d(i, j, k), gc.size());
   } else {
@@ -1959,7 +1613,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 8; ++m) {
-        if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -2024,7 +1679,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         }
 
         real vPlus[7] = {}, vMinus[7] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 3;
         real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][
                      tx]
@@ -2032,7 +1687,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][
                      iP][tx]
                    + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
@@ -2040,8 +1696,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
           LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][
                   tx]
                 + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
@@ -2049,7 +1706,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][
                 tx]
               + temp1 * sumBetaQ[7];
-        vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -2057,18 +1715,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         int iP = i_shared - 3;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         real LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
           LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
     } else if (param->inviscid_scheme == 52) {
@@ -2077,7 +1738,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 6; ++m) {
-        if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -2142,28 +1804,31 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         }
 
         real vPlus[5] = {}, vMinus[5] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 2;
         real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx]
                    + L[3] * F[3][iP][tx] + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[0];
         real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
                    + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
                 + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[m];
           LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
                 + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
               + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[5];
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
               + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[5];
-        vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -2171,18 +1836,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
         int iP = i_shared - 2;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         real LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
           LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
     } // temp2 is not 1/(c*c) anymore.
@@ -2263,12 +1931,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
     in_sponge = true;
   }
 
-  int left_bound = -100, right_bound = -100;
-  if (k < 3 && zone->bType_kl(i, j) != 0)
-    left_bound = k;
-  if (k > zone->mz - 5 && zone->bType_kr(i, j) != 0)
-    right_bound = k;
-
   extern __shared__ real s[];
 
   const auto &cv = zone->cv;
@@ -2299,9 +1961,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
   // if (if_shock) {
   eps_ref = eps_weno * param->weno_eps_scale; // * 0.25 * (kxJ * kxJ + kyJ * kyJ + kzJ * kzJ);
   // }
-  real kx = 0.5 * (zone->metric(i, j, k, 6) + zone->metric(i, j, k + 1, 6));
-  real ky = 0.5 * (zone->metric(i, j, k, 7) + zone->metric(i, j, k + 1, 7));
-  real kz = 0.5 * (zone->metric(i, j, k, 8) + zone->metric(i, j, k + 1, 8));
+  real kx = kxJ;
+  real ky = kyJ;
+  real kz = kzJ;
 
   if (const auto sch = param->inviscid_scheme;
       (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
@@ -2385,7 +2047,6 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         vm[5] = fm[l][i_shared + 3][tx];
         vm[6] = fm[l][i_shared + 4][tx];
 
-        // hc(i, j, k, l) = WENO7_bound(vp, vm, eps_here, if_shock, left_bound, right_bound, zone->mz);
         hc(i, j, k, l) = WENO7(vp, vm, eps_here, if_shock);
       } else if (param->inviscid_scheme == 51 || in_sponge) {
         real vp[5], vm[5];
@@ -2435,9 +2096,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       real q1 = cv_data[idx3d + 1 * sz_3d];
       real q2 = cv_data[idx3d + 2 * sz_3d];
       real q3 = cv_data[idx3d + 3 * sz_3d];
-      real metric0 = metric_data[idx3d + 0 * sz_3d];
-      real metric1 = metric_data[idx3d + 1 * sz_3d];
-      real metric2 = metric_data[idx3d + 2 * sz_3d];
+      real metric0 = metric_data[idx3d + 6 * sz_3d];
+      real metric1 = metric_data[idx3d + 7 * sz_3d];
+      real metric2 = metric_data[idx3d + 8 * sz_3d];
       real cGradK = norm3d(metric0, metric1, metric2);
       if constexpr (mix_model != MixtureModel::Air)
         cGradK *= acoustic_speed_data[idx3d];
@@ -2451,9 +2112,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       q1 = cv_data[idx3d + 1 * sz_3d];
       q2 = cv_data[idx3d + 2 * sz_3d];
       q3 = cv_data[idx3d + 3 * sz_3d];
-      metric0 = metric_data[idx3d + 0 * sz_3d];
-      metric1 = metric_data[idx3d + 1 * sz_3d];
-      metric2 = metric_data[idx3d + 2 * sz_3d];
+      metric0 = metric_data[idx3d + 6 * sz_3d];
+      metric1 = metric_data[idx3d + 7 * sz_3d];
+      metric2 = metric_data[idx3d + 8 * sz_3d];
       cGradK = norm3d(metric0, metric1, metric2);
       if constexpr (mix_model != MixtureModel::Air)
         cGradK *= acoustic_speed_data[idx3d];
@@ -2545,16 +2206,12 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       cGradK *= acoustic_speed_data[idx3d];
     else
       cGradK *= sqrt(gamma_air * R_air * bv_data[idx3d + 5 * sz_3d]);
-    // const real lambda0 = abs(Uk) + cGradK;
-    // F[5][iSh][tx] = lambda0;
     F[5][iSh][tx] = cGradK;
     F[6][iSh][tx] = jac_data[idx3d];
   }
   __syncthreads();
 
   if constexpr (mix_model == MixtureModel::Air) {
-    // weno_ch_air_yz_piro(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, hc.data(),
-    //                     hc.idx3d(i, j, k), hc.size());
     weno_ch_air_yz(param, reinterpret_cast<const real **>(s), i_shared, kx, ky, kz, eps_ref, if_shock, hc.data(),
                    hc.idx3d(i, j, k), hc.size());
   } else {
@@ -2630,7 +2287,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 8; ++m) {
-        if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -2695,7 +2353,7 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         }
 
         real vPlus[7] = {}, vMinus[7] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 3;
         real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][
                      tx]
@@ -2703,7 +2361,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][
                      iP][tx]
                    + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
@@ -2711,8 +2370,9 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
           LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][
                   tx]
                 + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
@@ -2720,7 +2380,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx] + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][
                 tx]
               + temp1 * sumBetaQ[7];
-        vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -2728,18 +2389,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         int iP = i_shared - 3;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         real LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 7; ++m) {
           iP = i_shared - 3 + m;
           LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
           LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared - 3 + 7;
         LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vMinus[6] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[6] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO7(vPlus, vMinus, eps_ref, if_shock);
       }
     } else if (param->inviscid_scheme == 52) {
@@ -2748,7 +2412,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
       // Find the max spectral radius
       real max_lambda = 0;
       for (int m = 0; m < 6; ++m) {
-        if (real lam = abs(F[0][baseP + m][tx]) + F[5][baseP + m][tx]; lam > max_lambda) {
+        const int p = baseP + m;
+        if (const real lam = F[6][p][tx] * (abs(F[0][p][tx]) + F[5][p][tx]); lam > max_lambda) {
           max_lambda = lam;
         }
       }
@@ -2813,28 +2478,31 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         }
 
         real vPlus[5] = {}, vMinus[5] = {};
-        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-abs(Uk)+cGradK, 6-jac, 7~9-kx,ky,kz
+        // 0-Uk, 1-rho*u*Uk+p*kx, 2-rho*v*Uk+p*ky, 3-rho*w*Uk+p*kz, 4-pk, 5-cGradK, 6-jac, 7~9-kx,ky,kz
         int iP = i_shared - 2;
         real LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx]
                    + L[3] * F[3][iP][tx] + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[0];
         real LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
                    + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[0];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
                 + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[m];
           LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
                 + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[m];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = L[0] * (Q[0][iP][tx] * F[0][iP][tx]) + L[1] * F[1][iP][tx] + L[2] * F[2][iP][tx] + L[3] * F[3][iP][tx]
               + L[4] * ((Q[4][iP][tx] + F[4][iP][tx]) * F[0][iP][tx]) + temp1 * sumBetaF[5];
         LQm = L[0] * Q[0][iP][tx] + L[1] * Q[1][iP][tx] + L[2] * Q[2][iP][tx]
               + L[3] * Q[3][iP][tx] + L[4] * Q[4][iP][tx] + temp1 * sumBetaQ[5];
-        vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
       for (int l = 0; l < n_var - 5; ++l) {
@@ -2842,18 +2510,21 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
         int iP = i_shared - 2;
         real LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         real LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vPlus[0] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vPlus[0] = 0.5 * (LFm + max_lambda * LQm);
         for (int m = 1; m < 5; ++m) {
           iP = i_shared - 2 + m;
           LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
           LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-          vPlus[m] = 0.5 * F[6][iP][tx] * (LFm + max_lambda * LQm);
-          vMinus[m - 1] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+          LFm *= F[6][iP][tx];
+          vPlus[m] = 0.5 * (LFm + max_lambda * LQm);
+          vMinus[m - 1] = 0.5 * (LFm - max_lambda * LQm);
         }
         iP = i_shared + 3;
         LFm = F[0][iP][tx] * (Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx]);
         LQm = Q[5 + l][iP][tx] - svm[l] * Q[0][iP][tx];
-        vMinus[4] = 0.5 * F[6][iP][tx] * (LFm - max_lambda * LQm);
+        LFm *= F[6][iP][tx];
+        vMinus[4] = 0.5 * (LFm - max_lambda * LQm);
         fChar[5 + l] = WENO5(vPlus, vMinus, eps_ref, if_shock);
       }
     } // temp2 is not 1/(c*c) anymore.
@@ -2983,74 +2654,6 @@ __device__ void positive_preserving_limiter(const real *f_1st, int n_var, int ti
     // }
 
     fc_yq_i[l] = min(theta_p, theta_m) * (fc_yq_i[l] - f_1st[tid * ns + l]) + f_1st[tid * ns + l];
-  }
-}
-
-__device__ void positive_preserving_limiter_1(int dim, int n_var, const real *cv, int i_shared, const real *jac,
-  real dt, real *fci, const real *metric, const real *cc, const real *Fp) {
-  const real alpha = dim == 3 ? 1.0 / 3.0 : 0.5;
-  const auto *cvl = &cv[i_shared * n_var];
-  const auto *cvr = &cv[(i_shared + 1) * n_var];
-
-  for (int l = 0; l < n_var - 5; ++l) {
-    real f1{0.0};
-    bool f1_computed{false};
-    real theta_p = 1.0, theta_m = 1.0;
-    const real up = 0.5 * alpha * cvl[l + 5] * jac[i_shared] - dt * fci[l + 5];
-    if (up < 0) {
-      const real temp1 = abs((metric[i_shared * 3] * cvl[1] +
-                              metric[i_shared * 3 + 1] * cvl[2] +
-                              metric[i_shared * 3 + 2] * cvl[3]) / cvl[0] +
-                             cc[i_shared] * norm3d(metric[i_shared * 3], metric[i_shared * 3 + 1],
-                                                   metric[i_shared * 3 + 2])); // spectralRadThis
-      const real temp2 = abs((metric[(i_shared + 1) * 3] * cvr[1] +
-                              metric[(i_shared + 1) * 3 + 1] * cvr[2] +
-                              metric[(i_shared + 1) * 3 + 2] * cvr[3]) / cvr[0] +
-                             cc[i_shared + 1] * norm3d(metric[(i_shared + 1) * 3], metric[(i_shared + 1) * 3 + 1],
-                                                       metric[(i_shared + 1) * 3 + 2])); // spectralRadNext
-      f1 = 0.5 * (Fp[i_shared * n_var + l + 5] + temp1 * cvl[l + 5] * jac[i_shared]) +
-           0.5 * (Fp[(i_shared + 1) * n_var + l + 5] - temp2 * cvr[l + 5] * jac[i_shared + 1]);
-      f1_computed = true;
-      const real up_lf = 0.5 * alpha * cvl[l + 5] * jac[i_shared] - dt * f1;
-      if (abs(up - up_lf) > 1e-20) {
-        theta_p = (0 - up_lf) / (up - up_lf);
-        if (theta_p > 1)
-          theta_p = 1.0;
-        else if (theta_p < 0)
-          theta_p = 0;
-      }
-    }
-
-    const real um =
-        0.5 * alpha * cvr[l + 5] * jac[i_shared + 1] + dt * fci[l + 5];
-    if (um < 0) {
-      if (!f1_computed) {
-        real temp1 = abs((metric[i_shared * 3] * cvl[1] +
-                          metric[i_shared * 3 + 1] * cvl[2] +
-                          metric[i_shared * 3 + 2] * cvl[3]) / cvl[0] +
-                         cc[i_shared] * norm3d(metric[i_shared * 3], metric[i_shared * 3 + 1],
-                                               metric[i_shared * 3 + 2])); // spectralRadThis
-        real temp2 = abs((metric[(i_shared + 1) * 3] * cvr[1] +
-                          metric[(i_shared + 1) * 3 + 1] * cvr[2] +
-                          metric[(i_shared + 1) * 3 + 2] * cvr[3]) / cvr[0] +
-                         cc[i_shared + 1] * norm3d(metric[(i_shared + 1) * 3], metric[(i_shared + 1) * 3 + 1],
-                                                   metric[(i_shared + 1) * 3 + 2])); // spectralRadNext
-        f1 = 0.5 * (Fp[i_shared * n_var + l + 5] + temp1 * cvl[l + 5] * jac[i_shared]) +
-             0.5 *
-             (Fp[(i_shared + 1) * n_var + l + 5] - temp2 * cvr[l + 5] * jac[i_shared + 1]);
-      }
-      const real um_lf =
-          0.5 * alpha * cvr[l + 5] * jac[i_shared + 1] + dt * f1;
-      if (abs(um - um_lf) > 1e-20) {
-        theta_m = (0 - um_lf) / (um - um_lf);
-        if (theta_m > 1)
-          theta_m = 1.0;
-        else if (theta_m < 0)
-          theta_m = 0;
-      }
-    }
-
-    fci[l + 5] = min(theta_p, theta_m) * (fci[l + 5] - f1) + f1;
   }
 }
 
