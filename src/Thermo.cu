@@ -356,7 +356,7 @@ __device__ void cfd::compute_gibbs_div_rt(real t, const DParameter *param, real 
       if (t < param->temperature_cuts(i, 0)) {
         const real tt = param->temperature_cuts(i, 0);
         const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, itt = 1 / tt, lntt = log(tt), itt2 = itt * itt;
-        gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt + 1) +
+        gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt - 1) +
                       coeff(2, 0, i) * (1.0 - lntt) - 0.5 * coeff(3, 0, i) * tt - coeff(4, 0, i) * tt2 / 6.0 -
                       coeff(5, 0, i) * tt3 / 12.0 - coeff(6, 0, i) * tt4 * 0.05 + coeff(7, 0, i) * itt -
                       coeff(8, 0, i);
@@ -364,14 +364,14 @@ __device__ void cfd::compute_gibbs_div_rt(real t, const DParameter *param, real 
         const real tt = param->temperature_cuts(i, param->n_temperature_range[i]);
         const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, itt = 1 / tt, lntt = log(tt), itt2 = itt * itt;
         const auto j = param->n_temperature_range[i] - 1;
-        gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt + 1) +
+        gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt - 1) +
                       coeff(2, j, i) * (1.0 - lntt) - 0.5 * coeff(3, j, i) * tt - coeff(4, j, i) * tt2 / 6.0 -
                       coeff(5, j, i) * tt3 / 12.0 - coeff(6, j, i) * tt4 * 0.05 + coeff(7, j, i) * itt -
                       coeff(8, j, i);
       } else {
         for (int j = 0; j < param->n_temperature_range[i]; ++j) {
           if (param->temperature_cuts(i, j) <= t && t <= param->temperature_cuts(i, j + 1)) {
-            gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt + 1) +
+            gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt - 1) +
                           coeff(2, j, i) * (1.0 - lnt) - 0.5 * coeff(3, j, i) * t - coeff(4, j, i) * t2 / 6.0 -
                           coeff(5, j, i) * t3 / 12.0 - coeff(6, j, i) * t4 * 0.05 + coeff(7, j, i) * it -
                           coeff(8, j, i);
@@ -603,7 +603,7 @@ __device__ void cfd::compute_gibbs_div_rt(real t, const DParameter *param, real 
       if (t < param->temperature_cuts(i, 0)) {
         const real tt = param->temperature_cuts(i, 0);
         const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, itt = 1 / tt, lntt = log(tt), itt2 = itt * itt;
-        gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt + 1) +
+        gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt - 1) +
                       coeff(2, 0, i) * (1.0 - lntt) - 0.5 * coeff(3, 0, i) * tt - coeff(4, 0, i) * tt2 / 6.0 -
                       coeff(5, 0, i) * tt3 / 12.0 - coeff(6, 0, i) * tt4 * 0.05 + coeff(7, 0, i) * itt -
                       coeff(8, 0, i);
@@ -611,14 +611,14 @@ __device__ void cfd::compute_gibbs_div_rt(real t, const DParameter *param, real 
         const real tt = param->temperature_cuts(i, param->n_temperature_range[i]);
         const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt, itt = 1 / tt, lntt = log(tt), itt2 = itt * itt;
         const auto j = param->n_temperature_range[i] - 1;
-        gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt + 1) +
+        gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt - 1) +
                       coeff(2, j, i) * (1.0 - lntt) - 0.5 * coeff(3, j, i) * tt - coeff(4, j, i) * tt2 / 6.0 -
                       coeff(5, j, i) * tt3 / 12.0 - coeff(6, j, i) * tt4 * 0.05 + coeff(7, j, i) * itt -
                       coeff(8, j, i);
       } else {
         for (int j = 0; j < param->n_temperature_range[i]; ++j) {
           if (param->temperature_cuts(i, j) <= t && t <= param->temperature_cuts(i, j + 1)) {
-            gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt + 1) +
+            gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt - 1) +
                           coeff(2, j, i) * (1.0 - lnt) - 0.5 * coeff(3, j, i) * t - coeff(4, j, i) * t2 / 6.0 -
                           coeff(5, j, i) * t3 / 12.0 - coeff(6, j, i) * t4 * 0.05 + coeff(7, j, i) * it -
                           coeff(8, j, i);
@@ -812,13 +812,34 @@ __device__ real cfd::compute_mixture_tr_energy(real t, const real *y, const DPar
 
 __device__ real cfd::invert_tve_from_eve(real eve_target, const real *y, real t_init, const DParameter *param) {
   constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
-  real tve = max(t_init, static_cast<real>(1.0));
+  constexpr real t_min = static_cast<real>(1.0);
+  constexpr real t_max = static_cast<real>(1.0e6);
+  constexpr real cv_floor = static_cast<real>(1e-8);
+  const real target = max(eve_target, static_cast<real>(0.0));
+  real low = t_min;
+  real high = max(t_min, t_init);
+  real cv_unused{};
+  real eve_high = compute_mixture_ve_energy(high, y, param, &cv_unused);
+  while (eve_high < target && high < t_max) {
+    high = min(static_cast<real>(2.0) * high, t_max);
+    eve_high = compute_mixture_ve_energy(high, y, param, &cv_unused);
+  }
+  real tve = min(max(t_init, low), high);
   for (int iter = 0; iter < 80; ++iter) {
     real cv_ve{};
     const real eve = compute_mixture_ve_energy(tve, y, param, &cv_ve);
-    const real residual = eve - eve_target;
-    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(eve_target))) break;
-    const real next_tve = max(static_cast<real>(1.0), tve - residual / max(cv_ve, static_cast<real>(1e-8)));
+    const real residual = eve - target;
+    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(target))) break;
+    if (residual > 0.0) {
+      high = tve;
+    } else {
+      low = tve;
+    }
+    real next_tve = static_cast<real>(0.5) * (low + high);
+    const real newton_tve = tve - residual / max(cv_ve, cv_floor);
+    if (isfinite(newton_tve) && newton_tve > low && newton_tve < high) {
+      next_tve = newton_tve;
+    }
     if (abs(next_tve - tve) < tolerance * max(static_cast<real>(1.0), tve)) {
       tve = next_tve;
       break;
@@ -830,13 +851,34 @@ __device__ real cfd::invert_tve_from_eve(real eve_target, const real *y, real t_
 
 __device__ real cfd::invert_tve_from_ev(real ev_target, const real *y, real t_init, const DParameter *param) {
   constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
-  real tve = max(t_init, static_cast<real>(1.0));
+  constexpr real t_min = static_cast<real>(1.0);
+  constexpr real t_max = static_cast<real>(1.0e6);
+  constexpr real cv_floor = static_cast<real>(1e-8);
+  const real target = max(ev_target, static_cast<real>(0.0));
+  real low = t_min;
+  real high = max(t_min, t_init);
+  real cv_unused{};
+  real ev_high = compute_mixture_vib_energy(high, y, param, &cv_unused);
+  while (ev_high < target && high < t_max) {
+    high = min(static_cast<real>(2.0) * high, t_max);
+    ev_high = compute_mixture_vib_energy(high, y, param, &cv_unused);
+  }
+  real tve = min(max(t_init, low), high);
   for (int iter = 0; iter < 80; ++iter) {
     real cv_v{};
     const real ev = compute_mixture_vib_energy(tve, y, param, &cv_v);
-    const real residual = ev - ev_target;
-    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(ev_target))) break;
-    const real next_tve = max(static_cast<real>(1.0), tve - residual / max(cv_v, static_cast<real>(1e-8)));
+    const real residual = ev - target;
+    if (abs(residual) < tolerance * max(static_cast<real>(1.0), abs(target))) break;
+    if (residual > 0.0) {
+      high = tve;
+    } else {
+      low = tve;
+    }
+    real next_tve = static_cast<real>(0.5) * (low + high);
+    const real newton_tve = tve - residual / max(cv_v, cv_floor);
+    if (isfinite(newton_tve) && newton_tve > low && newton_tve < high) {
+      next_tve = newton_tve;
+    }
     if (abs(next_tve - tve) < tolerance * max(static_cast<real>(1.0), tve)) {
       tve = next_tve;
       break;

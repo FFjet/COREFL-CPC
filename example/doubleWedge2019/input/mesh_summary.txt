@@ -12,39 +12,39 @@ Geometry points [m]:
 
 Mesh:
   blocks: 4
-  total structured cells: 5606400
-  total block-counted points: 5617724
-  target x-direction spacing: 1.000000000000e-05 m
-  first wall-normal spacing: 7.967418527273e-06 m
+  total structured cells: 1868800
+  total block-counted points: 1874284
+  target x-direction spacing: 3.000000000000e-05 m
+  first wall-normal spacing: 9.000000000000e-06 m
   normal cells: 640
-  B1_V_to_O: nodes=1001 x 641, cells=1000 x 640
-  B2_O_to_1: nodes=4401 x 641, cells=4400 x 640
-  B3_1_to_2: nodes=1461 x 641, cells=1460 x 640
-  B4_2_to_3: nodes=1901 x 641, cells=1900 x 640
-  segment cells V-O / O-1 / 1-2 / 2-3: 1000 / 4400 / 1460 / 1900
-  x_spacing_min: 9.999999999982e-06
-  x_spacing_max: 1.000000000002e-05
-  wall_tangent_min: 9.999999999982e-06
-  wall_tangent_max: 1.740588719339e-05
-  top_tangent_min: 9.999999999982e-06
-  top_tangent_max: 1.000000000002e-05
-  wall_first_min: 7.967418527266e-06
-  wall_first_max: 7.967418527280e-06
-  top_first_min: 5.322245865369e-04
-  top_first_max: 9.482773949095e-04
-  tangent_adjacent_ratio_max: 1.000000000004e+00
-  normal_adjacent_ratio_max: 1.007507361630e+00
-  min signed cell area: 7.967418478444e-11 m^2
-  max signed cell area: 9.482773949323e-09 m^2
+  B1_V_to_O: nodes=334 x 641, cells=333 x 640
+  B2_O_to_1: nodes=1468 x 641, cells=1467 x 640
+  B3_1_to_2: nodes=488 x 641, cells=487 x 640
+  B4_2_to_3: nodes=634 x 641, cells=633 x 640
+  segment cells V-O / O-1 / 1-2 / 2-3: 333 / 1467 / 487 / 633
+  x_spacing_min: 2.997946611909e-05
+  x_spacing_max: 3.003003003003e-05
+  wall_tangent_min: 3.001579778829e-05
+  wall_tangent_max: 5.218192053868e-05
+  top_tangent_min: 2.997946611909e-05
+  top_tangent_max: 3.003003003003e-05
+  wall_first_min: 8.999999999995e-06
+  wall_first_max: 9.000000000009e-06
+  top_first_min: 5.136831295695e-04
+  top_first_max: 9.193368219024e-04
+  tangent_adjacent_ratio_max: 1.000000000001e+00
+  normal_adjacent_ratio_max: 1.007266379334e+00
+  min signed cell area: 2.698151947093e-10 m^2
+  max signed cell area: 2.760771236968e-08 m^2
 
 Block interface checks:
-  B1_V_to_O <-> B2_O_to_1: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.000000000000e+00, adjacent_dx_ratio_mean=1.000000000000e+00, tangent_mismatch=0.000000000000e+00 m
-  B2_O_to_1 <-> B3_1_to_2: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.000000000001e+00, adjacent_dx_ratio_mean=1.000000000001e+00, tangent_mismatch=0.000000000000e+00 m
-  B3_1_to_2 <-> B4_2_to_3: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.000000000000e+00, adjacent_dx_ratio_mean=1.000000000000e+00, tangent_mismatch=0.000000000000e+00 m
+  B1_V_to_O <-> B2_O_to_1: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.001228501229e+00, adjacent_dx_ratio_mean=1.001228501229e+00, tangent_mismatch=0.000000000000e+00 m
+  B2_O_to_1 <-> B3_1_to_2: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.000457554790e+00, adjacent_dx_ratio_mean=1.000457554790e+00, tangent_mismatch=0.000000000000e+00 m
+  B3_1_to_2 <-> B4_2_to_3: node_mismatch=0.000000000000e+00 m, adjacent_dx_ratio_max=1.001211885131e+00, adjacent_dx_ratio_mean=1.001211885131e+00, tangent_mismatch=0.000000000000e+00 m
 
 y+ and wall-parallel plus estimates using first cell center:
-  low_enthalpy: max_yplus=1.590541457541e+00, min_yplus=1.403548602232e-01, max_wall_parallel_plus=4.610119092757e+00, min_wall_parallel_plus=3.523220469536e-01, mu=1.254909090909e-05 kg/(m s)
-  high_enthalpy: max_yplus=8.000000000037e-01, min_yplus=7.059475730525e-02, max_wall_parallel_plus=2.318767144821e+00, min_wall_parallel_plus=1.772086079415e-01, mu=3.465454545455e-05 kg/(m s)
+  low_enthalpy: max_yplus=1.365256431458e+00, min_yplus=1.585490876047e-01, max_wall_parallel_plus=1.050700808893e+01, min_wall_parallel_plus=1.057550522904e+00, mu=1.254909090909e-05 kg/(m s)
+  high_enthalpy: max_yplus=6.866876308020e-01, min_yplus=7.974596919996e-02, max_wall_parallel_plus=5.284745286787e+00, min_wall_parallel_plus=5.319197524312e-01, mu=3.465454545455e-05 kg/(m s)
   target: first-cell-center y+ < 1.0
 
 Boundary labels:

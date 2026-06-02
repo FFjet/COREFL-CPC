@@ -25,20 +25,43 @@ inline int find_temperature_ve_output_index(const Parameter &parameter) {
   }
 }
 
+inline void reconstruct_temperature_ve_from_eve(
+  const Parameter &parameter, std::vector<Field> &field, const Species &species, int i_tve) {
+  const int i_eve = parameter.get_int("i_eve");
+  if (i_eve < 0 || i_tve < 0 || species.n_spec <= 0) return;
+
+  std::vector<real> y(species.n_spec, 0.0);
+  for (auto &f: field) {
+    const int ngg = f.block.ngg;
+    for (int k = -ngg; k < f.block.mz + ngg; ++k) {
+      for (int j = -ngg; j < f.block.my + ngg; ++j) {
+        for (int i = -ngg; i < f.block.mx + ngg; ++i) {
+          for (int l = 0; l < species.n_spec; ++l) {
+            y[l] = f.sv(i, j, k, l);
+          }
+          const real eve = std::max<real>(f.sv(i, j, k, i_eve), 0.0);
+          const real t_guess = std::max<real>(f.bv(i, j, k, 5), 1.0);
+          f.ov(i, j, k, i_tve) = species.invert_tve_from_eve(eve, y, t_guess);
+        }
+      }
+    }
+  }
+}
+
 inline void copy_two_temperature_restart_auxiliary_to_device(
-  const Parameter &parameter, std::vector<Field> &field, bool temperature_ve_read) {
+  const Parameter &parameter, std::vector<Field> &field, const Species &species, bool temperature_ve_read) {
   if constexpr (kTwoTemperature) {
     if (parameter.get_int("i_eve") < 0) return;
     const int i_tve = find_temperature_ve_output_index(parameter);
     if (i_tve < 0) return;
 
+    if (!temperature_ve_read) {
+      reconstruct_temperature_ve_from_eve(parameter, field, species, i_tve);
+    }
+
     for (auto &f: field) {
       const auto n_bytes = f.h_ptr->temperature_ve.size() * sizeof(real);
-      if (temperature_ve_read) {
-        cudaMemcpy(f.h_ptr->temperature_ve.data(), f.ov[i_tve], n_bytes, cudaMemcpyHostToDevice);
-      } else {
-        cudaMemset(f.h_ptr->temperature_ve.data(), 0, n_bytes);
-      }
+      cudaMemcpy(f.h_ptr->temperature_ve.data(), f.ov[i_tve], n_bytes, cudaMemcpyHostToDevice);
     }
   }
 }
@@ -219,12 +242,15 @@ void modify_values(Parameter &parameter, const Mesh &mesh, std::vector<Field> &f
 
 template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const Mesh &mesh, std::vector<Field> &field,
   Species &species, bool restore_step) {
-  const std::filesystem::path out_dir("output");
-  if (!exists(out_dir)) {
-    printf("The directory to flowfield files does not exist!\n");
+  std::filesystem::path flowfield_file{"output/flowfield.plt"};
+  if (const std::string requested_file = parameter.get_string("restart_flowfield_file"); !requested_file.empty()) {
+    flowfield_file = requested_file;
+  }
+  if (!exists(flowfield_file)) {
+    printf("The flowfield file %s does not exist!\n", flowfield_file.string().c_str());
   }
   MPI_File fp;
-  MPI_File_open(MPI_COMM_WORLD, (out_dir.string() + "/flowfield.plt").c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fp);
+  MPI_File_open(MPI_COMM_WORLD, flowfield_file.string().c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fp);
   MPI_Offset offset{0};
   MPI_Status status;
 
@@ -456,7 +482,7 @@ template<MixtureModel mix_model> void read_flowfield(Parameter &parameter, const
       cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                  cudaMemcpyHostToDevice);
     }
-    copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
+    copy_two_temperature_restart_auxiliary_to_device(parameter, field, species, temperature_ve_read);
 
     restore_restart_step(parameter, restore_step);
 
@@ -702,7 +728,7 @@ template<MixtureModel mix_model> void read_2D_for_3D(Parameter &parameter, const
     cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                cudaMemcpyHostToDevice);
   }
-  copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
+  copy_two_temperature_restart_auxiliary_to_device(parameter, field, species, temperature_ve_read);
 
   std::ifstream step_file{"output/message/step.txt"};
   int step{0};
@@ -839,7 +865,7 @@ template<MixtureModel mix_model> void read_flowfield_with_same_block(Parameter &
     cudaMemcpy(f.h_ptr->sv.data(), f.sv.data(), f.h_ptr->sv.size() * sizeof(real) * parameter.get_int("n_scalar"),
                cudaMemcpyHostToDevice);
   }
-  copy_two_temperature_restart_auxiliary_to_device(parameter, field, temperature_ve_read);
+  copy_two_temperature_restart_auxiliary_to_device(parameter, field, species, temperature_ve_read);
 
   restore_restart_step(parameter, restore_step);
 

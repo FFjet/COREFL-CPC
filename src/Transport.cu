@@ -149,6 +149,118 @@ __device__ void cfd::compute_transport_property(int i, int j, int k, real temper
   }
 }
 
+namespace {
+__device__ __forceinline__ real ml_inverse_scale_float(float x, const float *mins, const float *scales, int idx,
+  float log_epsilon, bool log_standard) {
+  const float unscaled = fmaf(x, scales[idx], mins[idx]);
+  if (log_standard) {
+    return static_cast<real>(expf(unscaled) - log_epsilon);
+  }
+  return static_cast<real>(unscaled);
+}
+
+__device__ void mlp_forward_tanh_hidden(const float *weights, const float *biases, const float *input_mins,
+  const float *input_scales, const float *output_mins, const float *output_scales, int input_count, int hidden_count,
+  int hidden_layers, int output_count, float output_log_epsilon, bool output_log_standard, const real *raw_input,
+  real *raw_output) {
+  float hidden_a[32];
+  float hidden_b[32];
+  float scaled_input[8];
+  float *prev = hidden_a;
+  float *next = hidden_b;
+  int weight_offset = 0;
+  int bias_offset = 0;
+
+  for (int q = 0; q < input_count; ++q) {
+    scaled_input[q] = (static_cast<float>(raw_input[q]) - input_mins[q]) / input_scales[q];
+  }
+
+  for (int node = 0; node < hidden_count; ++node) {
+    float sum = biases[node];
+    const int base = node * input_count;
+    for (int q = 0; q < input_count; ++q) {
+      sum = fmaf(weights[base + q], scaled_input[q], sum);
+    }
+    prev[node] = tanhf(sum);
+  }
+  weight_offset += hidden_count * input_count;
+  bias_offset += hidden_count;
+
+  for (int layer = 1; layer < hidden_layers; ++layer) {
+    for (int node = 0; node < hidden_count; ++node) {
+      float sum = biases[bias_offset + node];
+      const int base = weight_offset + node * hidden_count;
+      for (int q = 0; q < hidden_count; ++q) {
+        sum = fmaf(weights[base + q], prev[q], sum);
+      }
+      next[node] = tanhf(sum);
+    }
+    weight_offset += hidden_count * hidden_count;
+    bias_offset += hidden_count;
+    float *tmp = prev;
+    prev = next;
+    next = tmp;
+  }
+
+  for (int node = 0; node < output_count; ++node) {
+    float sum = biases[bias_offset + node];
+    const int base = weight_offset + node * hidden_count;
+    for (int q = 0; q < hidden_count; ++q) {
+      sum = fmaf(weights[base + q], prev[q], sum);
+    }
+    raw_output[node] = ml_inverse_scale_float(sum, output_mins, output_scales, node, output_log_epsilon,
+                                              output_log_standard);
+  }
+}
+} // namespace
+
+__device__ void cfd::compute_transport_property_mlp(int i, int j, int k, real temperature, DParameter *param,
+  DZone *zone) {
+  static_assert(MAX_SPEC_NUMBER >= 5, "Air-5 ML transport requires MAX_SPEC_NUMBER >= 5.");
+  real input[8];
+  input[0] = temperature;
+  input[1] = zone->bv(i, j, k, 4);
+  input[2] = input[0];
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      input[2] = zone->temperature_ve(i, j, k);
+    }
+  }
+  for (int l = 0; l < 5; ++l) {
+    input[3 + l] = zone->sv(i, j, k, l);
+  }
+
+  real transport_output[3];
+  mlp_forward_tanh_hidden(param->ml_transport_weights, param->ml_transport_biases,
+                          param->ml_transport_input_mins, param->ml_transport_input_scales,
+                          param->ml_transport_output_mins, param->ml_transport_output_scales,
+                          param->ml_transport_input_count, param->ml_transport_hidden_count,
+                          param->ml_transport_hidden_layers, param->ml_transport_output_count,
+                          param->ml_transport_output_log_epsilon, param->ml_transport_output_log_standard, input,
+                          transport_output);
+
+  zone->mul(i, j, k) = transport_output[0];
+  zone->thermal_conductivity(i, j, k) = transport_output[1];
+  if constexpr (kTwoTemperature) {
+    if (param->i_eve >= 0) {
+      zone->thermal_conductivity_ve(i, j, k) = transport_output[2];
+    }
+  }
+
+  real diffusion_output[MAX_SPEC_NUMBER];
+  mlp_forward_tanh_hidden(param->ml_diffusion_weights, param->ml_diffusion_biases,
+                          param->ml_diffusion_input_mins, param->ml_diffusion_input_scales,
+                          param->ml_diffusion_output_mins, param->ml_diffusion_output_scales,
+                          param->ml_diffusion_input_count, param->ml_diffusion_hidden_count,
+                          param->ml_diffusion_hidden_layers, param->ml_diffusion_output_count,
+                          param->ml_diffusion_output_log_epsilon, param->ml_diffusion_output_log_standard, input,
+                          diffusion_output);
+  const real rho = zone->bv(i, j, k, 0);
+  for (int l = 0; l < 5; ++l) {
+    zone->rho_D(i, j, k, l) = rho * diffusion_output[l];
+  }
+}
+
 __device__ real cfd::compute_viscosity(int i, int j, int k, real temperature, real mw_total, DParameter *param,
   const DZone *zone) {
   const auto n_spec{param->n_spec};

@@ -14,7 +14,7 @@ list(APPEND src_file
     ImplicitTreatmentHPP.cuh Initialize.cuh Initialize.cu InviscidScheme.cuh InviscidScheme.cu IOManager.h
     kernels.cuh kernels.cu kernels.h
     Limiter.cuh Mesh.cu Mesh.cuh
-    main.cu Mesh.h Mesh.cpp MixtureFraction.cpp MixtureFraction.h Monitor.cuh Monitor.cu MixingLayer.cuh MixingLayer.cu
+    main.cu Mesh.h Mesh.cpp MLTransportModel.h MLTransportModel.cu MixtureFraction.cpp MixtureFraction.h Monitor.cuh Monitor.cu MixingLayer.cuh MixingLayer.cu
     Parallel.h Parallel.cpp Parameter.h Parameter.cpp PostProcess.h PostProcess.cu
     Reconstruction.cu Reconstruction.cuh Residual.cu Residual.cuh RK.cuh RiemannSolver.cuh
     SteadySim.cuh Simulate.cuh
@@ -37,8 +37,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 cmake_policy(SET CMP0074 NEW)
 find_package(MPI QUIET)
-
-add_executable(corefl ${src_file})
 
 set(COREFL_MPI_INCLUDE_DIRS
     ${MPI_CXX_HEADER_DIR}
@@ -91,56 +89,40 @@ endif()
 list(REMOVE_DUPLICATES COREFL_MPI_INCLUDE_DIRS)
 list(REMOVE_DUPLICATES COREFL_MPI_FORCE_INCLUDE_DIRS)
 
-if(COREFL_MPI_INCLUDE_DIRS)
-    target_include_directories(corefl PRIVATE ${COREFL_MPI_INCLUDE_DIRS})
-endif()
+function(configure_corefl_target target_name use_ml_transport)
+    add_executable(${target_name} ${src_file})
 
-foreach(COREFL_MPI_FORCE_INCLUDE_DIR IN LISTS COREFL_MPI_FORCE_INCLUDE_DIRS)
-    if(EXISTS "${COREFL_MPI_FORCE_INCLUDE_DIR}/mpi.h")
-        target_compile_options(corefl PRIVATE
-            "$<$<COMPILE_LANGUAGE:CXX>:-I${COREFL_MPI_FORCE_INCLUDE_DIR}>"
-            "$<$<COMPILE_LANGUAGE:CUDA>:-I${COREFL_MPI_FORCE_INCLUDE_DIR}>"
-        )
+    if(COREFL_MPI_INCLUDE_DIRS)
+        target_include_directories(${target_name} PRIVATE ${COREFL_MPI_INCLUDE_DIRS})
     endif()
-endforeach()
 
-if(COREFL_MPI_LINK_OPTIONS)
-    target_link_options(corefl PRIVATE ${COREFL_MPI_LINK_OPTIONS})
-endif()
+    foreach(COREFL_MPI_FORCE_INCLUDE_DIR IN LISTS COREFL_MPI_FORCE_INCLUDE_DIRS)
+        if(EXISTS "${COREFL_MPI_FORCE_INCLUDE_DIR}/mpi.h")
+            target_compile_options(${target_name} PRIVATE
+                "$<$<COMPILE_LANGUAGE:CXX>:-I${COREFL_MPI_FORCE_INCLUDE_DIR}>"
+                "$<$<COMPILE_LANGUAGE:CUDA>:-I${COREFL_MPI_FORCE_INCLUDE_DIR}>"
+            )
+        endif()
+    endforeach()
 
-set_target_properties(corefl PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    #INTERPROCEDURAL_OPTIMIZATION TRUE
-)
+    if(COREFL_MPI_LINK_OPTIONS)
+        target_link_options(${target_name} PRIVATE ${COREFL_MPI_LINK_OPTIONS})
+    endif()
 
-set_target_properties(corefl
-    PROPERTIES
-    CXX_STANDARD 20 # A newer version CMake 3.25.2 would support this
-    CXX_EXTENSIONS OFF
-    CXX_STANDARD_REQUIRED ON
-    #  "$<$<COMPILE_LANGUAGE:CXX>:${flags_release}>"
-)
+    target_compile_definitions(${target_name} PRIVATE COREFL_USE_ML_TRANSPORT=${use_ml_transport})
 
-#target_include_directories(corefl
-#    PUBLIC
-#    ${CMAKE_SOURCE_DIR}/depends/include/
-#)
+    set_target_properties(${target_name} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CXX_STANDARD 20
+        CXX_EXTENSIONS OFF
+        CXX_STANDARD_REQUIRED ON
+    )
 
-#target_link_directories(corefl
-#    PUBLIC#PRIVATE
-#    "$<$<CONFIG:Debug>:${CMAKE_SOURCE_DIR}/depends/lib/debug>"
-#    "$<$<CONFIG:Release>:${CMAKE_SOURCE_DIR}/depends/lib/release>"
-#)
+    target_link_libraries(${target_name}
+        PUBLIC
+        ${COREFL_MPI_LINK_LIBRARIES}
+    )
+endfunction()
 
-#target_compile_options(2_CLionGPU
-#  PUBLIC#private
-#  ${flags}
-#  "$<$<COMPILE_LANGUAGE:CXX>:${flags_release}>"
-#  )
-
-target_link_libraries(corefl
-    PUBLIC#PRIVATE
-#    "$<$<CONFIG:Debug>:fmtd>"
-#    "$<$<CONFIG:Release>:fmt>"
-    ${COREFL_MPI_LINK_LIBRARIES}
-)
+configure_corefl_target(corefl 0)
+configure_corefl_target(corefl_ml 1)

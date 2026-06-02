@@ -337,8 +337,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
       for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
         for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
           for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-            min_val = std::min(min_val, b.x(i, j, k));
-            max_val = std::max(max_val, b.x(i, j, k));
+            min_val = std::min<double>(min_val, b.x(i, j, k));
+            max_val = std::max<double>(max_val, b.x(i, j, k));
           }
         }
       }
@@ -351,8 +351,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
       for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
         for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
           for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-            min_val = std::min(min_val, b.y(i, j, k));
-            max_val = std::max(max_val, b.y(i, j, k));
+            min_val = std::min<double>(min_val, b.y(i, j, k));
+            max_val = std::max<double>(max_val, b.y(i, j, k));
           }
         }
       }
@@ -365,8 +365,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
       for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
         for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
           for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-            min_val = std::min(min_val, b.z(i, j, k));
-            max_val = std::max(max_val, b.z(i, j, k));
+            min_val = std::min<double>(min_val, b.z(i, j, k));
+            max_val = std::max<double>(max_val, b.z(i, j, k));
           }
         }
       }
@@ -383,8 +383,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.bv(i, j, k, m));
-              max_val = std::max(max_val, v.bv(i, j, k, m));
+              min_val = std::min<double>(min_val, v.bv(i, j, k, m));
+              max_val = std::max<double>(max_val, v.bv(i, j, k, m));
             }
           }
         }
@@ -399,8 +399,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.ov(i, j, k, 0));
-              max_val = std::max(max_val, v.ov(i, j, k, 0));
+              min_val = std::min<double>(min_val, v.ov(i, j, k, 0));
+              max_val = std::max<double>(max_val, v.ov(i, j, k, 0));
             }
           }
         }
@@ -417,8 +417,8 @@ template<MixtureModel mix_model, OutputTimeChoice output_time_choice> void Bound
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.sv(i, j, k, m));
-              max_val = std::max(max_val, v.sv(i, j, k, m));
+              min_val = std::min<double>(min_val, v.sv(i, j, k, m));
+              max_val = std::max<double>(max_val, v.sv(i, j, k, m));
             }
           }
         }
@@ -496,8 +496,8 @@ BoundaryIO<mix_model, output_time_choice>::print_boundary() {
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.bv(i, j, k, m));
-              max_val = std::max(max_val, v.bv(i, j, k, m));
+              min_val = std::min<double>(min_val, v.bv(i, j, k, m));
+              max_val = std::max<double>(max_val, v.bv(i, j, k, m));
             }
           }
         }
@@ -512,8 +512,8 @@ BoundaryIO<mix_model, output_time_choice>::print_boundary() {
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.ov(i, j, k, 0));
-              max_val = std::max(max_val, v.ov(i, j, k, 0));
+              min_val = std::min<double>(min_val, v.ov(i, j, k, 0));
+              max_val = std::max<double>(max_val, v.ov(i, j, k, 0));
             }
           }
         }
@@ -530,8 +530,8 @@ BoundaryIO<mix_model, output_time_choice>::print_boundary() {
         for (int k = zs[l][f]; k <= ze[l][f]; ++k) {
           for (int j = ys[l][f]; j <= ye[l][f]; ++j) {
             for (int i = xs[l][f]; i <= xe[l][f]; ++i) {
-              min_val = std::min(min_val, v.sv(i, j, k, m));
-              max_val = std::max(max_val, v.sv(i, j, k, m));
+              min_val = std::min<double>(min_val, v.sv(i, j, k, m));
+              max_val = std::max<double>(max_val, v.sv(i, j, k, m));
             }
           }
         }

@@ -185,7 +185,7 @@ template<MixtureModel mix_model> __device__ __forceinline__ void compute_cv_from
   compute_total_energy<mix_model>(i, j, k, zone, param);
 }
 
-template<MixtureModel mix_model> __global__ void update_physical_properties(DZone * __restrict__ zone,
+template<MixtureModel mix_model, bool update_transport = true> __global__ void update_physical_properties(DZone * __restrict__ zone,
   DParameter * __restrict__ param) {
   const int mx{zone->mx}, my{zone->my}, mz{zone->mz}, ngg{zone->ngg};
   const int i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x) - ngg;
@@ -230,30 +230,42 @@ template<MixtureModel mix_model> __global__ void update_physical_properties(DZon
         if (zone->temperature_ve(i, j, k) <= 0) {
           zone->temperature_ve(i, j, k) = temperature;
         }
-        compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
-        const real conductivity_eq = zone->thermal_conductivity(i, j, k);
-        zone->thermal_conductivity(i, j, k) =
-            conductivity_eq * max(cp_tr, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
-        real cv_ve = cv_ve_eq;
-        if (zone->temperature_ve(i, j, k) != temperature) {
-          cv_ve = 0.0;
-          const real temperature_ve = zone->temperature_ve(i, j, k);
-          for (int l = 0; l < n_spec; ++l) {
-            const real yi = yk(i, j, k, l);
-            if (abs(yi) > trace_mass_fraction_cutoff) {
-              cv_ve += yi * compute_ve_cv(l, temperature_ve, param);
+        if constexpr (update_transport) {
+          if constexpr (kUseMlTransport) {
+            compute_transport_property_mlp(i, j, k, temperature, param, zone);
+          } else {
+            compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+            const real conductivity_eq = zone->thermal_conductivity(i, j, k);
+            zone->thermal_conductivity(i, j, k) =
+                conductivity_eq * max(cp_tr, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
+            real cv_ve = cv_ve_eq;
+            if (zone->temperature_ve(i, j, k) != temperature) {
+              cv_ve = 0.0;
+              const real temperature_ve = zone->temperature_ve(i, j, k);
+              for (int l = 0; l < n_spec; ++l) {
+                const real yi = yk(i, j, k, l);
+                if (abs(yi) > trace_mass_fraction_cutoff) {
+                  cv_ve += yi * compute_ve_cv(l, temperature_ve, param);
+                }
+              }
             }
+            zone->thermal_conductivity_ve(i, j, k) =
+                conductivity_eq * max(cv_ve, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
           }
         }
-        zone->thermal_conductivity_ve(i, j, k) =
-            conductivity_eq * max(cv_ve, static_cast<real>(0.0)) / max(cp_mix_tr, static_cast<real>(1e-8));
       } else {
         temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
         zone->gamma(i, j, k) = temp;         // gamma = cp / cv
         temp = sqrt(temp * R * temperature); // temp is acoustic speed now
         zone->acoustic_speed(i, j, k) = temp;
         zone->mach(i, j, k) = V / temp;
-        compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+        if constexpr (update_transport) {
+          if constexpr (kUseMlTransport) {
+            compute_transport_property_mlp(i, j, k, temperature, param, zone);
+          } else {
+            compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+          }
+        }
       }
     } else {
       temp = temp / (temp - R);            // temp is specific heat ratio (gamma) now, gamma = cp / cv = cp / (cp - R)
@@ -261,11 +273,19 @@ template<MixtureModel mix_model> __global__ void update_physical_properties(DZon
       temp = sqrt(temp * R * temperature); // temp is acoustic speed now
       zone->acoustic_speed(i, j, k) = temp;
       zone->mach(i, j, k) = V / temp;
-      compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+      if constexpr (update_transport) {
+        if constexpr (kUseMlTransport) {
+          compute_transport_property_mlp(i, j, k, temperature, param, zone);
+        } else {
+          compute_transport_property(i, j, k, temperature, mw, cp, param, zone);
+        }
+      }
     }
   } else {
     constexpr real c_temp{gamma_air * R_u / mw_air};
-    zone->mul(i, j, k) = Sutherland(temperature);
+    if constexpr (update_transport) {
+      zone->mul(i, j, k) = Sutherland(temperature);
+    }
     zone->mach(i, j, k) = V / std::sqrt(c_temp * temperature);
   }
 }

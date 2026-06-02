@@ -1739,6 +1739,24 @@ __global__ void EPI(DZone *zone, int n_spec) {
   solve_chem_system(lhs, zone, i, j, k, n_spec);
 }
 
+__global__ void EPI_rk(DZone *zone, int n_spec, real dt_stage) {
+  const int extent[3]{zone->mx, zone->my, zone->mz};
+  const int i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const int j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
+  const int k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
+  if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+
+  auto &chem_jac = zone->chem_src_jac;
+  real lhs[MAX_SPEC_NUMBER * MAX_SPEC_NUMBER] = {};
+  for (int m = 0; m < n_spec; ++m) {
+    for (int n = 0; n < n_spec; ++n) {
+      const real value = dt_stage * chem_jac(i, j, k, m * n_spec + n);
+      lhs[m * n_spec + n] = (m == n) ? 1.0 - value : -value;
+    }
+  }
+  solve_chem_system(lhs, zone, i, j, k, n_spec);
+}
+
 __device__ void EPI_for_dq0(DZone *zone, real diag, int i, int j, int k, int n_spec) {
   real lhs[MAX_SPEC_NUMBER * MAX_SPEC_NUMBER] = {};
   const real dt{zone->dt_local(i, j, k)};
@@ -1908,6 +1926,19 @@ __global__ void DA(DZone *zone, int n_spec) {
   auto &chem_jac = zone->chem_src_jac;
   for (int l = 0; l < n_spec; ++l) {
     zone->dq(i, j, k, 5 + l) /= 1 - dt * chem_jac(i, j, k, l);
+  }
+}
+
+__global__ void DA_rk(DZone *zone, int n_spec, real dt_stage) {
+  const int extent[3]{zone->mx, zone->my, zone->mz};
+  const int i = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const int j = static_cast<int>(blockDim.y * blockIdx.y + threadIdx.y);
+  const int k = static_cast<int>(blockDim.z * blockIdx.z + threadIdx.z);
+  if (i >= extent[0] || j >= extent[1] || k >= extent[2]) return;
+
+  auto &chem_jac = zone->chem_src_jac;
+  for (int l = 0; l < n_spec; ++l) {
+    zone->dq(i, j, k, 5 + l) /= 1 - dt_stage * chem_jac(i, j, k, l);
   }
 }
 } // cfd

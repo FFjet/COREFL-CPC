@@ -100,6 +100,33 @@ struct DParameter {
   ggxl::MatrixDyn<real> binary_diffusivity_coeff;
   ggxl::MatrixDyn<real> kb_over_eps_jk; // Used to compute reduced temperature for diffusion coefficients
   real *ZRotF298 = nullptr;
+
+  int ml_transport_input_count = 0;
+  int ml_transport_hidden_count = 0;
+  int ml_transport_hidden_layers = 0;
+  int ml_transport_output_count = 0;
+  float ml_transport_output_log_epsilon = 0.0f;
+  bool ml_transport_output_log_standard = false;
+  const float *ml_transport_weights = nullptr;
+  const float *ml_transport_biases = nullptr;
+  const float *ml_transport_input_mins = nullptr;
+  const float *ml_transport_input_scales = nullptr;
+  const float *ml_transport_output_mins = nullptr;
+  const float *ml_transport_output_scales = nullptr;
+
+  int ml_diffusion_input_count = 0;
+  int ml_diffusion_hidden_count = 0;
+  int ml_diffusion_hidden_layers = 0;
+  int ml_diffusion_output_count = 0;
+  float ml_diffusion_output_log_epsilon = 0.0f;
+  bool ml_diffusion_output_log_standard = false;
+  const float *ml_diffusion_weights = nullptr;
+  const float *ml_diffusion_biases = nullptr;
+  const float *ml_diffusion_input_mins = nullptr;
+  const float *ml_diffusion_input_scales = nullptr;
+  const float *ml_diffusion_output_mins = nullptr;
+  const float *ml_diffusion_output_scales = nullptr;
+
   bool two_temperature = kTwoTemperature;
   int *ve_mode = nullptr;
   real *theta_v = nullptr;

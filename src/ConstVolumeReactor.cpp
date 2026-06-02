@@ -1389,7 +1389,7 @@ void compute_gibbs_div_rt(real t, const Species &species, std::vector<real> &gib
       const real tt = species.temperature_range(i, 0);
       const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt;
       const real itt = 1.0 / tt, itt2 = itt * itt, lntt = std::log(tt);
-      gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt + 1) +
+      gibbs_rt[i] = -0.5 * coeff(0, 0, i) * itt2 + coeff(1, 0, i) * itt * (lntt - 1) +
                     coeff(2, 0, i) * (1.0 - lntt) - 0.5 * coeff(3, 0, i) * tt - coeff(4, 0, i) * tt2 / 6.0 -
                     coeff(5, 0, i) * tt3 / 12.0 - coeff(6, 0, i) * tt4 * 0.05 + coeff(7, 0, i) * itt -
                     coeff(8, 0, i);
@@ -1398,14 +1398,14 @@ void compute_gibbs_div_rt(real t, const Species &species, std::vector<real> &gib
       const real tt2 = tt * tt, tt3 = tt2 * tt, tt4 = tt3 * tt;
       const real itt = 1.0 / tt, itt2 = itt * itt, lntt = std::log(tt);
       const int j = species.n_temperature_range[i] - 1;
-      gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt + 1) +
+      gibbs_rt[i] = -0.5 * coeff(0, j, i) * itt2 + coeff(1, j, i) * itt * (lntt - 1) +
                     coeff(2, j, i) * (1.0 - lntt) - 0.5 * coeff(3, j, i) * tt - coeff(4, j, i) * tt2 / 6.0 -
                     coeff(5, j, i) * tt3 / 12.0 - coeff(6, j, i) * tt4 * 0.05 + coeff(7, j, i) * itt -
                     coeff(8, j, i);
     } else {
       for (int j = 0; j < species.n_temperature_range[i]; ++j) {
         if (species.temperature_range(i, j) <= t && t <= species.temperature_range(i, j + 1)) {
-          gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt + 1) +
+          gibbs_rt[i] = -0.5 * coeff(0, j, i) * it2 + coeff(1, j, i) * it * (lnt - 1) +
                         coeff(2, j, i) * (1.0 - lnt) - 0.5 * coeff(3, j, i) * t - coeff(4, j, i) * t2 / 6.0 -
                         coeff(5, j, i) * t3 / 12.0 - coeff(6, j, i) * t4 * 0.05 + coeff(7, j, i) * it -
                         coeff(8, j, i);

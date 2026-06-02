@@ -17,6 +17,8 @@ struct Driver {
 
   void initialize_computation();
 
+  void reload_flowfield(const std::string &flowfield_file, bool restore_step = false);
+
   void deallocate();
 
   int myid = 0;

@@ -49,6 +49,8 @@ __device__ void compute_chem_src_jacobian_diagonal(DZone *zone, int i, int j, in
 
 __global__ void EPI(DZone *zone, int n_spec);
 
+__global__ void EPI_rk(DZone *zone, int n_spec, real dt_stage);
+
 __device__ void EPI_for_dq0(DZone *zone, real diag, int i, int j, int k, int n_spec);
 
 __device__ void EPI_for_dqk(DZone *zone, real diag, int i, int j, int k, const real *dq_total, int n_spec);
@@ -58,4 +60,6 @@ __device__ void solve_chem_system(real *lhs, DZone *zone, int i, int j, int k, i
 __host__ __device__ void solve_chem_system(real *lhs, real *rhs, int dim);
 
 __global__ void DA(DZone *zone, int n_spec);
+
+__global__ void DA_rk(DZone *zone, int n_spec, real dt_stage);
 } // cfd

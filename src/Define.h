@@ -15,6 +15,10 @@ using uint = unsigned int;
 #define COREFL_ENABLE_TWO_TEMPERATURE 0
 #endif
 
+#ifndef COREFL_USE_ML_TRANSPORT
+#define COREFL_USE_ML_TRANSPORT 0
+#endif
+
 // The therm.dat may have only 2 ranges, or multiple temperature ranges.
 // When standard Chemkin is used with 2 temperature ranges, we define it as Combustion2Part.
 // When the therm.dat has multiple temperature ranges, we define it as HighTempMultiPart.
@@ -34,6 +38,7 @@ enum class OutputTimeChoice {
 
 namespace cfd {
 constexpr bool kTwoTemperature = COREFL_ENABLE_TWO_TEMPERATURE != 0;
+constexpr bool kUseMlTransport = COREFL_USE_ML_TRANSPORT != 0;
 namespace rok4e {
 constexpr real gamma = 0.572816062482135;
 constexpr real alpha21 = 0.432364435748567;

@@ -68,6 +68,7 @@ __device__ __forceinline__ void set_boundary_state(DZone *zone, const DParameter
   if constexpr (kTwoTemperature) {
     if (param->i_eve >= 0) {
       zone->temperature_ve(i, j, k) = max(tve, static_cast<real>(1.0));
+      sync_two_temperature_state_from_sv(zone, param, i, j, k);
     }
   }
   compute_cv_from_bv_1_point<mix_model>(zone, param, i, j, k);
@@ -1191,12 +1192,18 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
     MpiParallel::exit();
   }
 
-  int mx, my, mz;
+  int mx{}, my{}, mz{};
   bool i_read{false}, j_read{false}, k_read{false}, packing_read{false};
   std::string key;
   std::string data_packing{"POINT"};
+  bool parse_zone_line{true};
   while (!(i_read && j_read && k_read && packing_read)) {
-    std::getline(file_in, input);
+    if (parse_zone_line) {
+      parse_zone_line = false;
+    } else if (!std::getline(file_in, input)) {
+      printf("Failed to read ZONE extent from profile %s\n", file.c_str());
+      MpiParallel::exit();
+    }
     gxl::replace(input, '"', ' ');
     gxl::replace(input, ',', ' ');
     gxl::replace(input, '=', ' ');
@@ -1211,7 +1218,7 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
       } else if (key == "k" || key == "K") {
         line >> mz;
         k_read = true;
-      } else if (key == "f" || key == "DATAPACKING" || key == "datapacking") {
+      } else if (key == "f" || key == "F" || key == "DATAPACKING" || key == "datapacking") {
         line >> data_packing;
         data_packing = gxl::to_upper(data_packing);
         packing_read = true;
@@ -1254,6 +1261,8 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
 
   const int n_var = parameter.get_int("n_var");
   const int n_scalar = parameter.get_int("n_scalar");
+  const bool profile_matches_block =
+      extent[0] == block.mx && extent[1] == block.my && extent[2] == block.mz;
 
   const auto ngg = block.ngg;
   int range_i[2]{-ngg, block.mx + ngg - 1},
@@ -1280,22 +1289,28 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
       for (int j = range_j[0]; j <= range_j[1]; ++j) {
         for (int ic = 0; ic <= ngg; ++ic) {
           int i = bigNumberFace ? block.mx - 1 + ic : -ic;
-          real d_min = 1e+6;
           int i0 = 0, j0 = 0, k0 = 0;
-          for (int kk = 0; kk < extent[2]; ++kk) {
-            for (int jj = 0; jj < extent[1]; ++jj) {
-              for (int ii = 0; ii < extent[0]; ++ii) {
-                real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
-                              (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
-                if (d <= d_min) {
-                  d_min = d;
-                  i0 = ii;
-                  j0 = jj;
-                  k0 = kk;
+          if (profile_matches_block) {
+            i0 = bigNumberFace ? block.mx - 1 : 0;
+            j0 = max(0, min(j, block.my - 1));
+            k0 = max(0, min(k, block.mz - 1));
+          } else {
+            real d_min = 1e+6;
+            for (int kk = 0; kk < extent[2]; ++kk) {
+              for (int jj = 0; jj < extent[1]; ++jj) {
+                for (int ii = 0; ii < extent[0]; ++ii) {
+                  real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
+                                (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
+                  if (d <= d_min) {
+                    d_min = d;
+                    i0 = ii;
+                    j0 = jj;
+                    k0 = kk;
+                  }
                 }
               }
             }
@@ -1385,22 +1400,28 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
       for (int jc = 0; jc <= ngg; ++jc) {
         for (int i = range_i[0]; i <= range_i[1]; ++i) {
           int j = bigNumberFace ? block.my - 1 + jc : -jc;
-          real d_min = 1e+6;
           int i0 = 0, j0 = 0, k0 = 0;
-          for (int kk = 0; kk < extent[2]; ++kk) {
-            for (int jj = 0; jj < extent[1]; ++jj) {
-              for (int ii = 0; ii < extent[0]; ++ii) {
-                real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
-                              (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
-                if (d <= d_min) {
-                  d_min = d;
-                  i0 = ii;
-                  j0 = jj;
-                  k0 = kk;
+          if (profile_matches_block) {
+            i0 = max(0, min(i, block.mx - 1));
+            j0 = bigNumberFace ? block.my - 1 : 0;
+            k0 = max(0, min(k, block.mz - 1));
+          } else {
+            real d_min = 1e+6;
+            for (int kk = 0; kk < extent[2]; ++kk) {
+              for (int jj = 0; jj < extent[1]; ++jj) {
+                for (int ii = 0; ii < extent[0]; ++ii) {
+                  real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
+                                (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
+                  if (d <= d_min) {
+                    d_min = d;
+                    i0 = ii;
+                    j0 = jj;
+                    k0 = kk;
+                  }
                 }
               }
             }
@@ -1490,20 +1511,26 @@ void read_dat_profile(const Boundary &boundary, const std::string &file, const B
         for (int i = range_i[0]; i <= range_i[1]; ++i) {
           real d_min = 1e+6;
           int i0 = 0, j0 = 0, k0 = 0;
-          for (int kk = 0; kk < extent[2]; ++kk) {
-            for (int jj = 0; jj < extent[1]; ++jj) {
-              for (int ii = 0; ii < extent[0]; ++ii) {
-                real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
-                              (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
-                              (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
-                              (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
-                if (d <= d_min) {
-                  d_min = d;
-                  i0 = ii;
-                  j0 = jj;
-                  k0 = kk;
+          if (profile_matches_block) {
+            i0 = max(0, min(i, block.mx - 1));
+            j0 = max(0, min(j, block.my - 1));
+            k0 = bigNumberFace ? block.mz - 1 : 0;
+          } else {
+            for (int kk = 0; kk < extent[2]; ++kk) {
+              for (int jj = 0; jj < extent[1]; ++jj) {
+                for (int ii = 0; ii < extent[0]; ++ii) {
+                  real d = sqrt((block.x(i, j, k) - profile_read(ii, jj, kk, 0)) *
+                                (block.x(i, j, k) - profile_read(ii, jj, kk, 0)) +
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) *
+                                (block.y(i, j, k) - profile_read(ii, jj, kk, 1)) +
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)) *
+                                (block.z(i, j, k) - profile_read(ii, jj, kk, 2)));
+                  if (d <= d_min) {
+                    d_min = d;
+                    i0 = ii;
+                    j0 = jj;
+                    k0 = kk;
+                  }
                 }
               }
             }
@@ -2305,6 +2332,7 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
             const real tve_b = zone->temperature_ve(i, j, k) > 0.0 ? zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
             const real tve_i = zone->temperature_ve(ii, ij, ik) > 0.0 ? zone->temperature_ve(ii, ij, ik) : bv(ii, ij, ik, 5);
             zone->temperature_ve(gi, gj, gk) = max(2 * tve_b - tve_i, static_cast<real>(1.0));
+            sync_two_temperature_state_from_sv(zone, param, gi, gj, gk);
           }
         }
 
@@ -2327,6 +2355,7 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
           if (param->i_eve >= 0) {
             zone->temperature_ve(gi, gj, gk) = zone->temperature_ve(i, j, k) > 0.0 ?
                                                zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
+            sync_two_temperature_state_from_sv(zone, param, gi, gj, gk);
           }
         }
 
@@ -2346,6 +2375,7 @@ template<MixtureModel mix_model> __global__ void apply_outflow(DZone *zone, Outf
         if (param->i_eve >= 0) {
           zone->temperature_ve(gi, gj, gk) = zone->temperature_ve(i, j, k) > 0.0 ?
                                              zone->temperature_ve(i, j, k) : bv(i, j, k, 5);
+          sync_two_temperature_state_from_sv(zone, param, gi, gj, gk);
         }
       }
       compute_cv_from_bv_1_point<mix_model>(zone, param, gi, gj, gk);

@@ -47,8 +47,8 @@ MPI_Offset cfd::write_static_max_min(MPI_Offset offset, const Field &field, int 
   for (int k = -ngg; k < b.mz + ngg; ++k) {
     for (int j = -ngg; j < b.my + ngg; ++j) {
       for (int i = -ngg; i < b.mx + ngg; ++i) {
-        min_val = std::min(min_val, field.ov(i, j, k, 0));
-        max_val = std::max(max_val, field.ov(i, j, k, 0));
+        min_val = std::min<double>(min_val, field.ov(i, j, k, 0));
+        max_val = std::max<double>(max_val, field.ov(i, j, k, 0));
       }
     }
   }
@@ -83,8 +83,8 @@ MPI_Offset cfd::write_dynamic_max_min(MPI_Offset offset, const cfd::Field &field
     for (int k = -ngg; k < b.mz + ngg; ++k) {
       for (int j = -ngg; j < b.my + ngg; ++j) {
         for (int i = -ngg; i < b.mx + ngg; ++i) {
-          min_val = std::min(min_val, field.udv(i, j, k, l));
-          max_val = std::max(max_val, field.udv(i, j, k, l));
+          min_val = std::min<double>(min_val, field.udv(i, j, k, l));
+          max_val = std::max<double>(max_val, field.udv(i, j, k, l));
         }
       }
     }

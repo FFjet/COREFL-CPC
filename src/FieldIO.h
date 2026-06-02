@@ -286,8 +286,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.x(i, j, k));
-          max_val = std::max(max_val, b.x(i, j, k));
+          min_val = std::min<double>(min_val, b.x(i, j, k));
+          max_val = std::max<double>(max_val, b.x(i, j, k));
         }
       }
     }
@@ -300,8 +300,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.y(i, j, k));
-          max_val = std::max(max_val, b.y(i, j, k));
+          min_val = std::min<double>(min_val, b.y(i, j, k));
+          max_val = std::max<double>(max_val, b.y(i, j, k));
         }
       }
     }
@@ -314,8 +314,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.z(i, j, k));
-          max_val = std::max(max_val, b.z(i, j, k));
+          min_val = std::min<double>(min_val, b.z(i, j, k));
+          max_val = std::max<double>(max_val, b.z(i, j, k));
         }
       }
     }
@@ -335,8 +335,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.bv(i, j, k, l));
-            max_val = std::max(max_val, v.bv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.bv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.bv(i, j, k, l));
           }
         }
       }
@@ -353,8 +353,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.sv(i, j, k, l));
-            max_val = std::max(max_val, v.sv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.sv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.sv(i, j, k, l));
           }
         }
       }
@@ -370,8 +370,8 @@ void FieldIO<mix_model, output_time_choice>::write_common_data_section() {
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.ov(i, j, k, l));
-            max_val = std::max(max_val, v.ov(i, j, k, l));
+            min_val = std::min<double>(min_val, v.ov(i, j, k, l));
+            max_val = std::max<double>(max_val, v.ov(i, j, k, l));
           }
         }
       }
@@ -587,8 +587,8 @@ void FieldIO<mix_model, output_time_choice>::write_single_plane_file(
               max_val = val;
               first_val = false;
             } else {
-              min_val = std::min(min_val, val);
-              max_val = std::max(max_val, val);
+              min_val = std::min<double>(min_val, val);
+              max_val = std::max<double>(max_val, val);
             }
           }
         }
@@ -601,8 +601,8 @@ void FieldIO<mix_model, output_time_choice>::write_single_plane_file(
               max_val = val;
               first_val = false;
             } else {
-              min_val = std::min(min_val, val);
-              max_val = std::max(max_val, val);
+              min_val = std::min<double>(min_val, val);
+              max_val = std::max<double>(max_val, val);
             }
           }
         }
@@ -743,8 +743,8 @@ void FieldIO<mix_model, output_time_choice>::print_field(int step, real time) co
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.bv(i, j, k, l));
-            max_val = std::max(max_val, v.bv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.bv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.bv(i, j, k, l));
           }
         }
       }
@@ -761,8 +761,8 @@ void FieldIO<mix_model, output_time_choice>::print_field(int step, real time) co
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.sv(i, j, k, l));
-            max_val = std::max(max_val, v.sv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.sv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.sv(i, j, k, l));
           }
         }
       }
@@ -778,8 +778,8 @@ void FieldIO<mix_model, output_time_choice>::print_field(int step, real time) co
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.ov(i, j, k, l));
-            max_val = std::max(max_val, v.ov(i, j, k, l));
+            min_val = std::min<double>(min_val, v.ov(i, j, k, l));
+            max_val = std::max<double>(max_val, v.ov(i, j, k, l));
           }
         }
       }
@@ -1105,8 +1105,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.x(i, j, k));
-          max_val = std::max(max_val, b.x(i, j, k));
+          min_val = std::min<double>(min_val, b.x(i, j, k));
+          max_val = std::max<double>(max_val, b.x(i, j, k));
         }
       }
     }
@@ -1121,8 +1121,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.y(i, j, k));
-          max_val = std::max(max_val, b.y(i, j, k));
+          min_val = std::min<double>(min_val, b.y(i, j, k));
+          max_val = std::max<double>(max_val, b.y(i, j, k));
         }
       }
     }
@@ -1137,8 +1137,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
     for (int k = -ngg; k < mz + ngg; ++k) {
       for (int j = -ngg; j < my + ngg; ++j) {
         for (int i = -ngg; i < mx + ngg; ++i) {
-          min_val = std::min(min_val, b.z(i, j, k));
-          max_val = std::max(max_val, b.z(i, j, k));
+          min_val = std::min<double>(min_val, b.z(i, j, k));
+          max_val = std::max<double>(max_val, b.z(i, j, k));
         }
       }
     }
@@ -1155,8 +1155,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.bv(i, j, k, l));
-            max_val = std::max(max_val, v.bv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.bv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.bv(i, j, k, l));
           }
         }
       }
@@ -1170,8 +1170,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
     // for (int k = -ngg; k < mz + ngg; ++k) {
     //   for (int j = -ngg; j < my + ngg; ++j) {
     //     for (int i = -ngg; i < mx + ngg; ++i) {
-    //       min_val = std::min(min_val, v.ov(i, j, k, 0));
-    //       max_val = std::max(max_val, v.ov(i, j, k, 0));
+    //       min_val = std::min<double>(min_val, v.ov(i, j, k, 0));
+    //       max_val = std::max<double>(max_val, v.ov(i, j, k, 0));
     //     }
     //   }
     // }
@@ -1187,8 +1187,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.sv(i, j, k, l));
-            max_val = std::max(max_val, v.sv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.sv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.sv(i, j, k, l));
           }
         }
       }
@@ -1204,8 +1204,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
     //   for (int k = -ngg; k < mz + ngg; ++k) {
     //     for (int j = -ngg; j < my + ngg; ++j) {
     //       for (int i = -ngg; i < mx + ngg; ++i) {
-    //         min_val = std::min(min_val, v.ov(i, j, k, 1));
-    //         max_val = std::max(max_val, v.ov(i, j, k, 1));
+    //         min_val = std::min<double>(min_val, v.ov(i, j, k, 1));
+    //         max_val = std::max<double>(max_val, v.ov(i, j, k, 1));
     //       }
     //     }
     //   }
@@ -1221,8 +1221,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::write_common_data_section
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.ov(i, j, k, l));
-            max_val = std::max(max_val, v.ov(i, j, k, l));
+            min_val = std::min<double>(min_val, v.ov(i, j, k, l));
+            max_val = std::max<double>(max_val, v.ov(i, j, k, l));
           }
         }
       }
@@ -1455,8 +1455,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::print_field(int step, rea
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.bv(i, j, k, l));
-            max_val = std::max(max_val, v.bv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.bv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.bv(i, j, k, l));
           }
         }
       }
@@ -1470,8 +1470,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::print_field(int step, rea
     // for (int k = -ngg; k < mz + ngg; ++k) {
     //   for (int j = -ngg; j < my + ngg; ++j) {
     //     for (int i = -ngg; i < mx + ngg; ++i) {
-    //       min_val = std::min(min_val, v.ov(i, j, k, 0));
-    //       max_val = std::max(max_val, v.ov(i, j, k, 0));
+    //       min_val = std::min<double>(min_val, v.ov(i, j, k, 0));
+    //       max_val = std::max<double>(max_val, v.ov(i, j, k, 0));
     //     }
     //   }
     // }
@@ -1487,8 +1487,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::print_field(int step, rea
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.sv(i, j, k, l));
-            max_val = std::max(max_val, v.sv(i, j, k, l));
+            min_val = std::min<double>(min_val, v.sv(i, j, k, l));
+            max_val = std::max<double>(max_val, v.sv(i, j, k, l));
           }
         }
       }
@@ -1504,8 +1504,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::print_field(int step, rea
     //   for (int k = -ngg; k < mz + ngg; ++k) {
     //     for (int j = -ngg; j < my + ngg; ++j) {
     //       for (int i = -ngg; i < mx + ngg; ++i) {
-    //         min_val = std::min(min_val, v.ov(i, j, k, 1));
-    //         max_val = std::max(max_val, v.ov(i, j, k, 1));
+    //         min_val = std::min<double>(min_val, v.ov(i, j, k, 1));
+    //         max_val = std::max<double>(max_val, v.ov(i, j, k, 1));
     //       }
     //     }
     //   }
@@ -1521,8 +1521,8 @@ void FieldIO<mix_model, OutputTimeChoice::TimeSeries>::print_field(int step, rea
       for (int k = -ngg; k < mz + ngg; ++k) {
         for (int j = -ngg; j < my + ngg; ++j) {
           for (int i = -ngg; i < mx + ngg; ++i) {
-            min_val = std::min(min_val, v.ov(i, j, k, l));
-            max_val = std::max(max_val, v.ov(i, j, k, l));
+            min_val = std::min<double>(min_val, v.ov(i, j, k, l));
+            max_val = std::max<double>(max_val, v.ov(i, j, k, l));
           }
         }
       }

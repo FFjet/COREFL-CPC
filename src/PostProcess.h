@@ -1,7 +1,7 @@
 ﻿/**
  * @brief The file for declarations of post process procedures
  * @details Current available procedures:
- *    0 - compute wall friction and heat flux in 2D, which assumes a j=0 wall
+ *    0 - compute wall friction and heat flux in 2D on configured wall boundaries
  *    1 - compute wall friction and heat flux in 3D, which assumes a j=0 wall
  */
 #pragma once
@@ -20,12 +20,13 @@ struct DParameter;
 
 void post_process(const Mesh &mesh, const std::vector<Field> &field, const Parameter &parameter, DParameter *param);
 
-// Compute the wall friction and heat flux in 2D. Assume the wall is the j=0 plane
+// Compute the wall friction and heat flux in 2D on configured wall boundaries.
 // Procedure 0
 void wall_friction_heatflux_2d(const Mesh &mesh, const std::vector<Field> &field, const Parameter &parameter,
                                const DParameter *param);
 
-__global__ void wall_friction_heatFlux_2d(DZone *zone, real *wall_data, const DParameter *param, real dyn_pressure);
+__global__ void wall_friction_heatFlux_2d(DZone *zone, real *wall_data, const DParameter *param, real dyn_pressure,
+                                          int boundary_id, int start_index, int n_point);
 
 // Compute the wall friction and heat flux in 3D. Assume the wall is the j=0 plane
 // Procedure 1

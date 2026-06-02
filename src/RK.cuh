@@ -7,6 +7,7 @@
 #include <chrono>
 #include "SpongeLayer.cuh"
 #include "Fluctuation.cuh"
+#include "FiniteRateChem.cuh"
 
 namespace cfd {
 namespace SSPRK3 {
@@ -232,6 +233,14 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
         driver.bound_cond.template nonReflectingBoundary<mix_model>(mesh[b], field[b], param);
         profile_stop(t_prof, prof_non_reflecting);
 
+        if (parameter.get_int("reaction") == 1) {
+          if (const int chem_src_method = parameter.get_int("chemSrcMethod"); chem_src_method == 1) {
+            EPI_rk<<<bpg[b], tpb>>>(field[b].d_ptr, parameter.get_int("n_spec"), rk_stage_dt_scale[rk] * dt);
+          } else if (chem_src_method == 2) {
+            DA_rk<<<bpg[b], tpb>>>(field[b].d_ptr, parameter.get_int("n_spec"), rk_stage_dt_scale[rk] * dt);
+          }
+        }
+
         // update basic variables
         t_prof = profile_start();
         update_cv_and_bv_rk<mix_model><<<bpg[b], tpb>>>(field[b].d_ptr, param, dt, rk);
@@ -272,7 +281,15 @@ template<MixtureModel mix_model> void RK3(Driver<mix_model> &driver) {
       for (auto b = 0; b < n_block; ++b) {
         const int mx{mesh[b].mx}, my{mesh[b].my}, mz{mesh[b].mz};
         dim3 BPG{(mx + ng_1) / tpb.x + 1, (my + ng_1) / tpb.y + 1, (mz + ng_1) / tpb.z + 1};
-        update_physical_properties<mix_model><<<BPG, tpb>>>(field[b].d_ptr, param);
+        if constexpr (kUseMlTransport) {
+          if (rk == 2) {
+            update_physical_properties<mix_model, true><<<BPG, tpb>>>(field[b].d_ptr, param);
+          } else {
+            update_physical_properties<mix_model, false><<<BPG, tpb>>>(field[b].d_ptr, param);
+          }
+        } else {
+          update_physical_properties<mix_model, true><<<BPG, tpb>>>(field[b].d_ptr, param);
+        }
       }
       profile_stop(t_prof, prof_property);
     }

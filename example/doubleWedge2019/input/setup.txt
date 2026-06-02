@@ -1,24 +1,24 @@
-bool parallel = 1
+bool parallel = 0
 
 string canonical_problem = general
 
 real gridScale = 1
 int gridIsBinary = 1
 int symmetric_conservative_metric = 0
-int initial = 1
-int total_step = 288697
-int output_file = 100000000
+int initial = 0
+int total_step = 2000
+int output_file = 2000
 int output_screen = 200
-int output_time_series = 769
+int output_time_series = 2000
 
 bool steady = 0
 real cfl = 8.000000000000e-01
 int implicit_method = 0
 int temporal_scheme = 3
 bool fixed_time_step = 1
-real dt = 7.000000000000e-10
-real total_simulation_time = 2.020876500000e-04
-real set_current_physical_time = 3.791235000000e-05
+real dt = 5.000000000000e-10
+real total_simulation_time = 1.000000000000e-06
+real set_current_physical_time = 0.000000000000e+00
 
 int inviscid_scheme = 72
 int viscous_order = 8

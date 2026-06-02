@@ -1150,8 +1150,8 @@ void SinglePointStat::prepare_for_statistical_data_plot(const Species &species) 
     for (int k = 0; k < mz; ++k) {
       for (int j = 0; j < my; ++j) {
         for (int i = 0; i < mx; ++i) {
-          min_val = std::min(min_val, b.x(i, j, k));
-          max_val = std::max(max_val, b.x(i, j, k));
+          min_val = std::min<double>(min_val, b.x(i, j, k));
+          max_val = std::max<double>(max_val, b.x(i, j, k));
         }
       }
     }
@@ -1164,8 +1164,8 @@ void SinglePointStat::prepare_for_statistical_data_plot(const Species &species) 
     for (int k = 0; k < mz; ++k) {
       for (int j = 0; j < my; ++j) {
         for (int i = 0; i < mx; ++i) {
-          min_val = std::min(min_val, b.y(i, j, k));
-          max_val = std::max(max_val, b.y(i, j, k));
+          min_val = std::min<double>(min_val, b.y(i, j, k));
+          max_val = std::max<double>(max_val, b.y(i, j, k));
         }
       }
     }
@@ -1179,8 +1179,8 @@ void SinglePointStat::prepare_for_statistical_data_plot(const Species &species) 
       for (int k = 0; k < mz; ++k) {
         for (int j = 0; j < my; ++j) {
           for (int i = 0; i < mx; ++i) {
-            min_val = std::min(min_val, b.z(i, j, k));
-            max_val = std::max(max_val, b.z(i, j, k));
+            min_val = std::min<double>(min_val, b.z(i, j, k));
+            max_val = std::max<double>(max_val, b.z(i, j, k));
           }
         }
       }
@@ -1329,8 +1329,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       for (int k = 0; k < mz; ++k) {
         for (int j = 0; j < my; ++j) {
           for (int i = 0; i < mx; ++i) {
-            min_val = std::min(min_val, v.stat_reynolds_1st(i, j, k, l));
-            max_val = std::max(max_val, v.stat_reynolds_1st(i, j, k, l));
+            min_val = std::min<double>(min_val, v.stat_reynolds_1st(i, j, k, l));
+            max_val = std::max<double>(max_val, v.stat_reynolds_1st(i, j, k, l));
           }
         }
       }
@@ -1345,8 +1345,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       for (int k = 0; k < mz; ++k) {
         for (int j = 0; j < my; ++j) {
           for (int i = 0; i < mx; ++i) {
-            min_val = std::min(min_val, v.stat_favre_1st(i, j, k, l));
-            max_val = std::max(max_val, v.stat_favre_1st(i, j, k, l));
+            min_val = std::min<double>(min_val, v.stat_favre_1st(i, j, k, l));
+            max_val = std::max<double>(max_val, v.stat_favre_1st(i, j, k, l));
           }
         }
       }
@@ -1362,8 +1362,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_favre_1st(i, j, k, l + 4));
-              max_val = std::max(max_val, v.stat_favre_1st(i, j, k, l + 4));
+              min_val = std::min<double>(min_val, v.stat_favre_1st(i, j, k, l + 4));
+              max_val = std::max<double>(max_val, v.stat_favre_1st(i, j, k, l + 4));
             }
           }
         }
@@ -1379,8 +1379,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
       for (int k = 0; k < mz; ++k) {
         for (int j = 0; j < my; ++j) {
           for (int i = 0; i < mx; ++i) {
-            min_val = std::min(min_val, v.stat_favre_1st(i, j, k, l + 4 + ns_plot));
-            max_val = std::max(max_val, v.stat_favre_1st(i, j, k, l + 4 + ns_plot));
+            min_val = std::min<double>(min_val, v.stat_favre_1st(i, j, k, l + 4 + ns_plot));
+            max_val = std::max<double>(max_val, v.stat_favre_1st(i, j, k, l + 4 + ns_plot));
           }
         }
       }
@@ -1396,8 +1396,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_reynolds_2nd(i, j, k, l));
-              max_val = std::max(max_val, v.stat_reynolds_2nd(i, j, k, l));
+              min_val = std::min<double>(min_val, v.stat_reynolds_2nd(i, j, k, l));
+              max_val = std::max<double>(max_val, v.stat_reynolds_2nd(i, j, k, l));
             }
           }
         }
@@ -1412,8 +1412,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_reynolds_2nd(i, j, k, 2));
-              max_val = std::max(max_val, v.stat_reynolds_2nd(i, j, k, 2));
+              min_val = std::min<double>(min_val, v.stat_reynolds_2nd(i, j, k, 2));
+              max_val = std::max<double>(max_val, v.stat_reynolds_2nd(i, j, k, 2));
             }
           }
         }
@@ -1428,8 +1428,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, l));
-              max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, l));
+              min_val = std::min<double>(min_val, v.stat_favre_2nd(i, j, k, l));
+              max_val = std::max<double>(max_val, v.stat_favre_2nd(i, j, k, l));
             }
           }
         }
@@ -1445,8 +1445,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
           for (int k = 0; k < mz; ++k) {
             for (int j = 0; j < my; ++j) {
               for (int i = 0; i < mx; ++i) {
-                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
-                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
+                min_val = std::min<double>(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
+                max_val = std::max<double>(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + l));
               }
             }
           }
@@ -1462,8 +1462,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
         for (int k = 0; k < mz; ++k) {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
-              min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
-              max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
+              min_val = std::min<double>(min_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
+              max_val = std::max<double>(max_val, v.stat_favre_2nd(i, j, k, scalar_var_offset + ns_plot + l));
             }
           }
         }
@@ -1479,8 +1479,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
           for (int k = 0; k < mz; ++k) {
             for (int j = 0; j < my; ++j) {
               for (int i = 0; i < mx; ++i) {
-                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
-                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
+                min_val = std::min<double>(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
+                max_val = std::max<double>(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_u_offset + l));
               }
             }
           }
@@ -1495,8 +1495,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
           for (int k = 0; k < mz; ++k) {
             for (int j = 0; j < my; ++j) {
               for (int i = 0; i < mx; ++i) {
-                min_val = std::min(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
-                max_val = std::max(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
+                min_val = std::min<double>(min_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
+                max_val = std::max<double>(max_val, v.stat_favre_2nd(i, j, k, scalar_flux_v_offset + l));
               }
             }
           }
@@ -1515,8 +1515,8 @@ void SinglePointStat::plot_statistical_data(DParameter *param) const {
           for (int j = 0; j < my; ++j) {
             for (int i = 0; i < mx; ++i) {
               const real value = finite_or_zero(v.stat_wall_derived(i, j, k, l));
-              min_val = std::min(min_val, value);
-              max_val = std::max(max_val, value);
+              min_val = std::min<double>(min_val, value);
+              max_val = std::max<double>(max_val, value);
             }
           }
         }

@@ -169,12 +169,18 @@ std::array<int, 3> read_dat_profile_for_init(gxl::VectorField3D<real> &profile, 
     printf("The temperature or pressure is not given in the profile, please provide at least one of them!\n");
     cfd::MpiParallel::exit();
   }
-  int mx, my, mz;
+  int mx{}, my{}, mz{};
   bool i_read{false}, j_read{false}, k_read{false}, packing_read{false};
   std::string key;
   std::string data_packing{"POINT"};
+  bool parse_zone_line{true};
   while (!(i_read && j_read && k_read && packing_read)) {
-    std::getline(file_in, input);
+    if (parse_zone_line) {
+      parse_zone_line = false;
+    } else if (!std::getline(file_in, input)) {
+      printf("Failed to read ZONE extent from profile %s\n", file.c_str());
+      cfd::MpiParallel::exit();
+    }
     gxl::replace(input, '"', ' ');
     gxl::replace(input, ',', ' ');
     gxl::replace(input, '=', ' ');
@@ -189,7 +195,7 @@ std::array<int, 3> read_dat_profile_for_init(gxl::VectorField3D<real> &profile, 
       } else if (key == "k" || key == "K") {
         line >> mz;
         k_read = true;
-      } else if (key == "f" || key == "DATAPACKING" || key == "datapacking") {
+      } else if (key == "f" || key == "F" || key == "DATAPACKING" || key == "datapacking") {
         line >> data_packing;
         data_packing = gxl::to_upper(data_packing);
         packing_read = true;
@@ -290,6 +296,18 @@ std::array<int, 3> read_profile_to_init(gxl::VectorField3D<real> &profile, int p
   return {0, 0, 0};
 }
 
+std::array<int, 3> read_profile_file_to_init(gxl::VectorField3D<real> &profile, const std::string &file,
+  const cfd::Parameter &parameter, const cfd::Species &species) {
+  const auto dot = file.find_last_of('.');
+  const auto suffix = file.substr(dot + 1, file.size());
+  if (suffix == "dat") {
+    const auto extent = read_dat_profile_for_init(profile, file, parameter, species, 0);
+    printf("\tInit profile %s loaded with extent %d %d %d\n", file.c_str(), extent[0], extent[1], extent[2]);
+    return extent;
+  }
+  return {0, 0, 0};
+}
+
 __global__ void initialize_bv_with_inflow(const real *var_info, int n_inflow, cfd::DZone *zone,
   const real *coordinate_ranges, int n_scalar, const int *if_profile, ggxl::VectorField3D<real> *profiles,
   const int *extents) {
@@ -321,22 +339,39 @@ __global__ void initialize_bv_with_inflow(const real *var_info, int n_inflow, cf
     auto &profile = profiles[i_init];
     const auto xx = x(i, j, k), yy = y(i, j, k), zz = z(i, j, k);
     const auto extent = &extents[i_init * 3];
-    real d_mix = 1e+6;
     int i0{0}, j0{0}, k0{0};
-    for (int kk = 0; kk < extent[2]; ++kk) {
-      for (int jj = 0; jj < extent[1]; ++jj) {
-        for (int ii = 0; ii < extent[0]; ++ii) {
-          const real d = sqrt((xx - profile(ii, jj, kk, 0)) * (xx - profile(ii, jj, kk, 0)) +
-                              (yy - profile(ii, jj, kk, 1)) * (yy - profile(ii, jj, kk, 1)) +
-                              (zz - profile(ii, jj, kk, 2)) * (zz - profile(ii, jj, kk, 2)));
-          if (d < d_mix) {
-            d_mix = d;
-            i0 = ii;
-            j0 = jj;
-            k0 = kk;
+    if (extent[0] == mx && extent[1] == my && extent[2] == mz) {
+      i0 = max(0, min(i, extent[0] - 1));
+      j0 = max(0, min(j, extent[1] - 1));
+      k0 = max(0, min(k, extent[2] - 1));
+    } else if (extent[0] > 0 && extent[1] > 0 && extent[2] > 0) {
+      real d_mix = 1e+6;
+      for (int kk = 0; kk < extent[2]; ++kk) {
+        for (int jj = 0; jj < extent[1]; ++jj) {
+          for (int ii = 0; ii < extent[0]; ++ii) {
+            const real d = sqrt((xx - profile(ii, jj, kk, 0)) * (xx - profile(ii, jj, kk, 0)) +
+                                (yy - profile(ii, jj, kk, 1)) * (yy - profile(ii, jj, kk, 1)) +
+                                (zz - profile(ii, jj, kk, 2)) * (zz - profile(ii, jj, kk, 2)));
+            if (d < d_mix) {
+              d_mix = d;
+              i0 = ii;
+              j0 = jj;
+              k0 = kk;
+            }
           }
         }
       }
+    } else {
+      bv(i, j, k, 0) = rho[i_init];
+      bv(i, j, k, 1) = u[i_init];
+      bv(i, j, k, 2) = v[i_init];
+      bv(i, j, k, 3) = w[i_init];
+      bv(i, j, k, 4) = p[i_init];
+      bv(i, j, k, 5) = T[i_init];
+      for (int l = 0; l < n_scalar; ++l) {
+        sv(i, j, k, l) = scalar_inflow[l * n_inflow + i_init];
+      }
+      return;
     }
 
     // 0th order interpolation
@@ -374,18 +409,27 @@ void cfd::Field::initialize_basic_variables(const Parameter &parameter, const st
   std::vector<int> if_profile(n, 0);
   std::vector<int> profile_id(n, 0);
   std::vector<gxl::VectorField3D<real>> profiles(n);
-  std::vector<int> extent;
+  std::vector<int> extent(3 * n, 0);
   std::vector<std::array<int, 3>> extents(n);
+  const auto &init_profile_file = parameter.get_string("init_profile_file");
 
   for (int i = 0; i < static_cast<int>(inflows.size()); ++i) {
     std::tie(rho[i], u[i], v[i], w[i], p[i], T[i]) = inflows[i].var_info();
     if_profile[i] = inflows[i].inflow_type == 1 ? 1 : 0;
+    if (i == 0 && !init_profile_file.empty()) {
+      if_profile[i] = 1;
+      extents[i] = read_profile_file_to_init(profiles[i], init_profile_file, parameter, species);
+      extent[3 * i] = extents[i][0];
+      extent[3 * i + 1] = extents[i][1];
+      extent[3 * i + 2] = extents[i][2];
+      continue;
+    }
     if (if_profile[i]) {
       profile_id[i] = inflows[i].profile_idx;
       extents[i] = read_profile_to_init(profiles[i], i, parameter, species);
-      extent.push_back(extents[i][0]);
-      extent.push_back(extents[i][1]);
-      extent.push_back(extents[i][2]);
+      extent[3 * i] = extents[i][0];
+      extent[3 * i + 1] = extents[i][1];
+      extent[3 * i + 2] = extents[i][2];
     }
   }
   for (size_t i = 0; i < inflows.size(); ++i) {
@@ -421,8 +465,7 @@ void cfd::Field::initialize_basic_variables(const Parameter &parameter, const st
   cudaMemcpy(profiles_device, profile_dev_temp.data(), sizeof(ggxl::VectorField3D<real>) * n, cudaMemcpyHostToDevice);
   int *extent_device;
   cudaMalloc(&extent_device, sizeof(int) * 3 * n);
-  if (!extent.empty())
-    cudaMemcpy(extent_device, extent.data(), sizeof(int) * 3 * n, cudaMemcpyHostToDevice);
+  cudaMemcpy(extent_device, extent.data(), sizeof(int) * 3 * n, cudaMemcpyHostToDevice);
   int *if_profile_device;
   cudaMalloc(&if_profile_device, sizeof(int) * n);
   cudaMemcpy(if_profile_device, if_profile.data(), sizeof(int) * n, cudaMemcpyHostToDevice);
@@ -774,6 +817,9 @@ void cfd::Field::copy_data_from_device_async(const Parameter &parameter, cudaStr
 }
 
 void cfd::Field::deallocate_memory(const Parameter &parameter) {
+  if (h_ptr == nullptr && d_ptr == nullptr) {
+    return;
+  }
   cudaError_t err;
   err = h_ptr->x.deallocate_memory();
   err = h_ptr->y.deallocate_memory();
@@ -889,6 +935,11 @@ void cfd::Field::deallocate_memory(const Parameter &parameter) {
     printf("Error during deallocation: %s\n", cudaGetErrorString(err));
   }
 
-  cudaFree(&d_ptr);
+  err = cudaFree(d_ptr);
+  if (err != cudaSuccess) {
+    printf("Error during DZone deallocation: %s\n", cudaGetErrorString(err));
+  }
+  d_ptr = nullptr;
   delete h_ptr;
+  h_ptr = nullptr;
 }

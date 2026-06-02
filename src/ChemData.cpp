@@ -305,13 +305,34 @@ real cfd::Species::compute_mixture_ve_energy(real t, const std::vector<real> &y,
 
 real cfd::Species::invert_tve_from_eve(real eve_target, const std::vector<real> &y, real t_init) const {
   constexpr real tolerance = static_cast<real>(TVE_NEWTON_TOLERANCE);
-  real tve = std::max<real>(t_init, 1.0);
+  constexpr real t_min = 1.0;
+  constexpr real t_max = 1.0e6;
+  constexpr real cv_floor = 1e-8;
+  const real target = std::max<real>(eve_target, 0.0);
+  real low = t_min;
+  real high = std::max<real>(t_min, t_init);
+  real cv_unused{};
+  real eve_high = compute_mixture_ve_energy(high, y, &cv_unused);
+  while (eve_high < target && high < t_max) {
+    high = std::min<real>(2.0 * high, t_max);
+    eve_high = compute_mixture_ve_energy(high, y, &cv_unused);
+  }
+  real tve = std::min<real>(std::max<real>(t_init, low), high);
   for (int iter = 0; iter < 80; ++iter) {
     real cv_ve{};
     const real eve = compute_mixture_ve_energy(tve, y, &cv_ve);
-    const real residual = eve - eve_target;
-    if (std::abs(residual) < tolerance * std::max<real>(1.0, std::abs(eve_target))) break;
-    const real next_tve = std::max<real>(1.0, tve - residual / std::max<real>(cv_ve, 1e-8));
+    const real residual = eve - target;
+    if (std::abs(residual) < tolerance * std::max<real>(1.0, std::abs(target))) break;
+    if (residual > 0.0) {
+      high = tve;
+    } else {
+      low = tve;
+    }
+    real next_tve = 0.5 * (low + high);
+    const real newton_tve = tve - residual / std::max<real>(cv_ve, cv_floor);
+    if (std::isfinite(newton_tve) && newton_tve > low && newton_tve < high) {
+      next_tve = newton_tve;
+    }
     if (std::abs(next_tve - tve) < tolerance * std::max<real>(1.0, tve)) {
       tve = next_tve;
       break;
@@ -1254,6 +1275,18 @@ cfd::Reaction::Reaction(Parameter &parameter, const Species &species) {
       }
       if (parameter.get_int("myid") == 0) {
         printf("\t\t->-> %-25s : AIR-5 control-temperature model\n", "SU2 two-temperature");
+      }
+    }
+  } else if (kTwoTemperature && ns == 2 && n_reac == 2) {
+    const bool is_n2_binary = species.spec_list.contains("N2") && species.spec_list.contains("N");
+    if (is_n2_binary) {
+      two_temperature_reaction_temperature = true;
+      for (int r = 0; r < n_reac; ++r) {
+        tcf_a[r] = 0.5;
+        tcf_b[r] = 0.5;
+      }
+      if (parameter.get_int("myid") == 0) {
+        printf("\t\t->-> %-25s : N2 Park TTv control-temperature model\n", "Park two-temperature");
       }
     }
   }

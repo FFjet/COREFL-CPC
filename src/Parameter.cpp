@@ -301,7 +301,11 @@ void cfd::Parameter::deduce_known_info() {
       inviscid_scheme_name = "WENO5-ch";
       ngg = 3;
     } else if (inviscid_scheme == 71) {
-      inviscid_scheme_name = "WENO7-cp";
+      if (kTwoTemperature && get_int("species") == 1 && get_int("reaction") != 2) {
+        inviscid_scheme_name = "WENO7-ch(2T)";
+      } else {
+        inviscid_scheme_name = "WENO7-cp";
+      }
       ngg = 4;
     } else if (inviscid_scheme == 72) {
       inviscid_scheme_name = "WENO7-ch";
@@ -327,11 +331,6 @@ void cfd::Parameter::deduce_known_info() {
         printf("\t->-> %-20s : positive preserving.\n", "Yes");
       }
     }
-  }
-
-  if (bool_parameters["steady"] == 0 && int_parameters["temporal_scheme"] == 3) {
-    // RK-3, the chemical source should be treated explicitly.
-    update_parameter("chemSrcMethod", 0);
   }
 
   if (bool_parameters["if_wall_stats"]) {
@@ -458,6 +457,7 @@ void cfd::Parameter::setup_default_settings() {
 
   int_parameters["groups_init"] = 1;
   string_parameters["default_init"] = "freestream";
+  string_parameters["init_profile_file"] = "";
 
   int_parameters["diffusivity_method"] = 1;
   real_parameters["schmidt_number"] = 0.5;
@@ -479,6 +479,10 @@ void cfd::Parameter::setup_default_settings() {
   bool_parameters["if_wall_stats"] = false;
 
   int_array["post_process"] = {};
+  bool_parameters["post_process_only"] = false;
+  string_parameters["restart_flowfield_file"] = "";
+  string_array["post_process_flowfield_files"] = {};
+  string_parameters["post_process_output_dir"] = "output/postprocess_snapshots";
   int_array["output_bc"] = {};
 
   int_parameters["if_monitor_points"] = 0; // 0 - no monitor, 1 - monitor

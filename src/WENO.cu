@@ -893,7 +893,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
   real ky = 0.5 * (zone->metric(i, j, k, 1) + zone->metric(i + 1, j, k, 1));
   real kz = 0.5 * (zone->metric(i, j, k, 2) + zone->metric(i + 1, j, k, 2));
 
-  if (const auto sch = param->inviscid_scheme; sch == 51 || sch == 71) {
+  if (const auto sch = param->inviscid_scheme;
+      (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
     auto fp = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(s);
     auto fm = reinterpret_cast<real (*)[nx_block + 2 * 4 - 1]>(s + n_var * (nx_block + 2 * 4 - 1));
 
@@ -1212,7 +1213,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_x(
 
     // Local Lax-Friedrichs flux splitting
     temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
-    if (param->inviscid_scheme == 72) {
+    if (param->inviscid_scheme == 72 ||
+        (param->inviscid_scheme == 71 && param->two_temperature && param->i_eve >= 0)) {
       const int baseP = i_shared - 3;
 
       // Find the max spectral radius
@@ -1628,7 +1630,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
   real ky = 0.5 * (zone->metric(i, j, k, 4) + zone->metric(i, j + 1, k, 4));
   real kz = 0.5 * (zone->metric(i, j, k, 5) + zone->metric(i, j + 1, k, 5));
 
-  if (const auto sch = param->inviscid_scheme; sch == 51 || sch == 71) {
+  if (const auto sch = param->inviscid_scheme;
+      (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
     auto fp = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s);
     auto fm = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s + n_var * (nyy + 2 * 4 - 1) * 4);
 
@@ -1949,7 +1952,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_y(
     // Li Xinliang's flux splitting
     //  const real alpha{gm1 * 0.5 * (um * um + vm * vm + wm * wm)};
     temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
-    if (param->inviscid_scheme == 72) {
+    if (param->inviscid_scheme == 72 ||
+        (param->inviscid_scheme == 71 && param->two_temperature && param->i_eve >= 0)) {
       const int baseP = i_shared - 3;
 
       // Find the max spectral radius
@@ -2299,7 +2303,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
   real ky = 0.5 * (zone->metric(i, j, k, 7) + zone->metric(i, j, k + 1, 7));
   real kz = 0.5 * (zone->metric(i, j, k, 8) + zone->metric(i, j, k + 1, 8));
 
-  if (const auto sch = param->inviscid_scheme; sch == 51 || sch == 71) {
+  if (const auto sch = param->inviscid_scheme;
+      (sch == 51 || sch == 71) && !(sch == 71 && param->two_temperature && param->i_eve >= 0)) {
     auto fp = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s);
     auto fm = reinterpret_cast<real (*)[nyy + 2 * 4 - 1][4]>(s + n_var * (nyy + 2 * 4 - 1) * 4);
 
@@ -2618,7 +2623,8 @@ template<MixtureModel mix_model> __global__ void compute_convective_term_weno_z(
     // Li Xinliang's flux splitting
     //  const real alpha{gm1 * 0.5 * (um * um + vm * vm + wm * wm)};
     temp3 = 0.5 * gm1 * (um * um + vm * vm + wm * wm); // temp3 = alpha, used in the next loop.
-    if (param->inviscid_scheme == 72) {
+    if (param->inviscid_scheme == 72 ||
+        (param->inviscid_scheme == 71 && param->two_temperature && param->i_eve >= 0)) {
       const int baseP = i_shared - 3;
 
       // Find the max spectral radius

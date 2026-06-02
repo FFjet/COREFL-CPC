@@ -1,51 +1,135 @@
-# Build artifacts
-build/
-srcold/
-build-*/
-build-codex-*/
-CMakeFiles/
-example/**/input/grid/
+# Build directories
+/build/
+/build-*/
+/build_*/
+/build.*/
+/cmake-build-*/
+/out/
+/bin/
+/lib/
+/CMakeFiles/
+
+# CMake / build-system files
 CMakeCache.txt
 cmake_install.cmake
-corefl
-corefl-*
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+Makefile
+compile_commands.json
+install_manifest.txt
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
 
-# Runtime outputs
-output/
+# Compiled objects, libraries, and executables
+*.o
+*.obj
+*.lo
+*.a
+*.la
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.su
+*.d
+/corefl
+/corefl_*
+/corefl-*
+/corefl_ml
+
+# CUDA / profiler artifacts
+*.cubin
+*.fatbin
+*.ptx
+*.sass
+*.nsys-rep
+*.qdrep
+*.sqlite
+*.nvvp
+
+# Runtime outputs and restart data
+/runs/
+/output/
 example/**/output/
+example/**/input/grid/
 history.dat
 example/**/history.dat
 Man, we are Finished.txt
 example/**/Man, we are Finished.txt
-*.plt
-*.log
-*.pid
 restart_*/
+restart*/
+*.plt
+*.tec
+*.vtk
+*.vtu
+*.pvtu
+*.su2
+*.xyz
+example/**/input/*.png
+*.dat~
+*.res
+*.pid
+*.log
 
-# Documentation builds
-docs/build/
+# Temporary local source copies and scratch files
+/srcold/
+/srcgxlnew/
+/tmp/
+/scratch/
+/.codex_runs/
+.codex_runs/
 
 # Python/cache artifacts
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
 
-# Compiled objects and libraries
-*.o
-*.obj
-*.so
-*.a
-*.out
-*.su2
-*.xyz
+# Documentation builds
+docs/build/
+docs/_build/
 
-# Local scratch artifacts
-tmp/
-.codex_runs/
-.git/
+# Editor, OS, and local metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*~
+.vscode/
+.idea/
+
+# Archives and generated packages
 *.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
 
-化学反应流动无粘通量雅可比矩阵及其特征向量.pdf
+# Local credentials and machine-specific files
 sshgithub
 sshgithub.pub
+id_rsa
+id_rsa.pub
+*.pem
+*.key
+
+# Local notes / PDFs kept outside version control
+化学反应流动无粘通量雅可比矩阵及其特征向量.pdf
 无粘通量离散.pdf
-.codex_runs

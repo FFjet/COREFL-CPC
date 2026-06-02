@@ -8,6 +8,8 @@
 #include "DataCommunication.cuh"
 #include "MixingLayer.cuh"
 #include <filesystem>
+#include <string>
+#include "MLTransportModel.h"
 
 namespace cfd {
 template<MixtureModel mix_model> Driver<mix_model>::Driver(Parameter &parameter, Mesh &mesh_) :
@@ -94,7 +96,9 @@ template<MixtureModel mix_model> Driver<mix_model>::Driver(Parameter &parameter,
   }
 
   // Transfer the parameters to GPU.
-  const DParameter d_param(parameter, spec, &reac);
+  DParameter d_param(parameter, spec, &reac);
+  const auto ml_transport_models = load_ml_transport_models(parameter, spec);
+  upload_ml_transport_models(d_param, ml_transport_models);
   cudaMalloc(&param, sizeof(DParameter));
   cudaMemcpy(param, &d_param, sizeof(DParameter), cudaMemcpyHostToDevice);
   cudaDeviceSynchronize();
@@ -207,6 +211,38 @@ template<MixtureModel mix_model> void Driver<mix_model>::initialize_computation(
   MPI_Barrier(MPI_COMM_WORLD);
   if (myid == 0) {
     printf("\tThe driver is completely initialized on GPU.\n");
+  }
+}
+
+template<MixtureModel mix_model> void Driver<mix_model>::reload_flowfield(const std::string &flowfield_file,
+                                                                           const bool restore_step) {
+  parameter.update_parameter("restart_flowfield_file", flowfield_file);
+  read_flowfield<mix_model>(parameter, mesh, field, spec, restore_step);
+
+  dim3 tpb{8, 8, 4};
+  if (mesh.dimension == 2) {
+    tpb = {16, 16, 1};
+  }
+  const auto ng_1 = 2 * mesh[0].ngg - 1;
+
+  for (int b = 0; b < mesh.n_block; ++b) {
+    bound_cond.apply_boundary_conditions<mix_model>(mesh[b], field[b], param, 0);
+  }
+  MpiParallel::barrier();
+  data_communication<mix_model>(mesh, field, parameter, 0, param);
+  MpiParallel::barrier();
+
+  for (auto b = 0; b < mesh.n_block; ++b) {
+    const int mx{mesh[b].mx}, my{mesh[b].my}, mz{mesh[b].mz};
+    dim3 bpg{(mx + ng_1) / tpb.x + 1, (my + ng_1) / tpb.y + 1, (mz + ng_1) / tpb.z + 1};
+    update_physical_properties<mix_model><<<bpg, tpb>>>(field[b].d_ptr, param);
+  }
+  cudaDeviceSynchronize();
+  MpiParallel::barrier();
+  const auto err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("Error in proc %d after reloading flowfield: %s\n", myid, cudaGetErrorString(err));
+    MpiParallel::exit();
   }
 }
 
